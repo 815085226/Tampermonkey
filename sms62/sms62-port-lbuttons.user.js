@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.6.1
+// @version      1.6.2
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -302,6 +302,40 @@
       // 悬浮提示展示组内设备清单
       tr.title = s.name + ' 设备: ' + s.devices.join(', ');
       tbody.appendChild(tr);
+    }
+
+    // 状态汇总行：跨组合计每个状态的总数
+    if (stats.length) {
+      const sumMap = {};
+      let sumTotal = 0;
+      let sumOver500 = 0;
+      for (const s of stats) {
+        sumTotal += s.total;
+        sumOver500 += s.over500;
+        for (const [label, count] of Object.entries(s.statusMap)) {
+          sumMap[label] = (sumMap[label] || 0) + count;
+        }
+      }
+      const sumChips =
+        Object.entries(sumMap)
+          .sort((a, b) => b[1] - a[1])
+          .map(
+            ([label, count]) =>
+              '<span style="display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;' +
+              'border-radius:3px;background:#f0f9eb;color:#67c23a;font-size:12px;">' +
+              label + ': <b>' + count + '</b></span>'
+          )
+          .join(' ') || '<span style="color:#c0c4cc">无数据</span>';
+
+      const sumTr = document.createElement('tr');
+      sumTr.innerHTML =
+        '<td style="border:1px solid #ebeef5;padding:8px 12px;font-weight:700;color:#303133;background:#fafafa;">汇总</td>' +
+        '<td style="border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;">' + sumTotal + '</td>' +
+        '<td style="border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;' +
+        (sumOver500 > 0 ? 'color:#f56c6c;' : 'color:#909399;') +
+        '">' + sumOver500 + '</td>' +
+        '<td style="border:1px solid #ebeef5;padding:8px 12px;background:#fafafa;">' + sumChips + '</td>';
+      tbody.appendChild(sumTr);
     }
     tbl.appendChild(tbody);
     wrap.appendChild(tbl);
@@ -638,5 +672,5 @@
     start();
   }
 
-  log('v1.6.1 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.6.2 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
