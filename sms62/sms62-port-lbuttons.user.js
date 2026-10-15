@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.7.2
+// @version      1.8.0
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -715,26 +715,285 @@
     await applyFilters({ devices });
   }
 
+  // ===== 批量推送（换卡/买套餐）：hover L 按钮下拉触发 =====
+  const BATCH_SEND_TOTAL = 500;          // 批量流程使用的发送总数阈值
+  const BATCH_RULE = '>';                // 发送总数规则（页面默认是"<"，需切为">"）
+  // hover 菜单项 → 弹窗里「推送类型」选项的映射（买套餐对应项如需调整改这里）
+  const MENU_PUSH_TYPE = {
+    '换卡': '换卡',
+    '买套餐': '等下用',
+  };
+
+  function findSendTotalControls() {
+    const lb = findQueryLabel('发送总数');
+    if (!lb) return null;
+    const container = lb.nextElementSibling; // el-input 容器
+    if (!container) return null;
+    const input =
+      container.querySelector('input.el-input__inner') ||
+      container.querySelector('input');
+    // 规则下拉在输入框的 append 插槽里
+    const appendSelect =
+      container.querySelector('.el-input-group__append .el-select__wrapper') ||
+      container.querySelector('.el-input-group__append .el-select');
+    return { input, appendSelect };
+  }
+
+  function setInputValue(input, val) {
+    input.value = val;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // 切换"发送总数"的规则下拉（< / > / = ...）
+  async function setSendTotalRule(rule) {
+    const c = findSendTotalControls();
+    if (!c || !c.appendSelect) { log('未找到发送总数规则下拉'); return false; }
+    document.body.click();
+    await sleep(250);
+    fireClick(c.appendSelect);
+    await sleep(400);
+    let item = null;
+    for (const d of document.querySelectorAll('.el-select-dropdown')) {
+      if (d.offsetParent === null) continue;
+      for (const it of d.querySelectorAll('.el-select-dropdown__item')) {
+        if (it.textContent.trim() === rule) { item = it; break; }
+      }
+      if (item) break;
+    }
+    if (!item) {
+      document.body.click();
+      log('未找到规则选项「' + rule + '」');
+      return false;
+    }
+    fireClick(item);
+    await sleep(200);
+    document.body.click();
+    await sleep(250);
+    log('发送总数规则已设为「' + rule + '」');
+    return true;
+  }
+
+  function findPushDialog() {
+    for (const dlg of document.querySelectorAll('.el-dialog')) {
+      const t = dlg.querySelector('.el-dialog__title');
+      if (!t || !t.textContent.includes('推送到 Telegram')) continue;
+      if (dlg.getBoundingClientRect().width > 0) return dlg; // 可见
+    }
+    return null;
+  }
+
+  async function waitForPushDialog(timeoutMs) {
+    const end = Date.now() + (timeoutMs || 8000);
+    while (Date.now() < end) {
+      const dlg = findPushDialog();
+      if (dlg) return dlg;
+      await sleep(400);
+    }
+    return null;
+  }
+
+  // 等人工在弹窗里点「确定」或「取消」（弹窗消失即继续）
+  async function waitForDialogClose() {
+    while (true) {
+      const dlg = findPushDialog();
+      if (!dlg) return true;
+      await sleep(500);
+    }
+  }
+
+  async function setPushTypeInDialog(dlg, pushType) {
+    const selWrap =
+      dlg.querySelector('.el-dialog__body .el-select__wrapper') ||
+      dlg.querySelector('.el-dialog__body .el-select');
+    if (!selWrap) { log('推送弹窗中未找到推送类型下拉'); return false; }
+    fireClick(selWrap);
+    await sleep(400);
+    let item = null;
+    for (const d of document.querySelectorAll('.el-select-dropdown')) {
+      if (d.offsetParent === null) continue;
+      for (const it of d.querySelectorAll('.el-select-dropdown__item')) {
+        if (it.textContent.trim() === pushType) { item = it; break; }
+      }
+      if (item) break;
+    }
+    if (!item) {
+      log('未找到推送类型选项「' + pushType + '」');
+      return false;
+    }
+    fireClick(item);
+    await sleep(250);
+    fireClick(selWrap); // 再点一下收起下拉（避免误关弹窗）
+    await sleep(300);
+    log('推送类型已选「' + pushType + '」，等待人工确认');
+    return true;
+  }
+
+  // 批量进度浮层
+  function batchProgress() {
+    let el = document.getElementById('gavin-batch-progress');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'gavin-batch-progress';
+      el.style.cssText =
+        'position:fixed;top:16px;right:16px;z-index:99999;background:#303133;color:#fff;' +
+        'padding:10px 16px;border-radius:6px;font-size:13px;line-height:1.5;' +
+        'box-shadow:0 4px 12px rgba(0,0,0,.25);max-width:380px;';
+      document.body.appendChild(el);
+    }
+    return (text) => { el.textContent = text; };
+  }
+  function removeBatchProgress() {
+    const el = document.getElementById('gavin-batch-progress');
+    if (el) el.remove();
+  }
+
+  // 批量主流程：遍历组内设备，逐台 筛选→查询→推送→人工确认
+  let batchRunning = false;
+  async function runBatch(groupName, menuItem) {
+    if (batchRunning || busy) { log('已有任务进行中，请稍候'); return; }
+    const devices = GROUPS_CURRENT[groupName];
+    if (!devices || !devices.length) { log('L 组 ' + groupName + ' 无设备'); return; }
+    const pushType = MENU_PUSH_TYPE[menuItem] || menuItem;
+
+    batchRunning = true;
+    busy = true; // 批量期间禁用其他快选操作
+    const prog = batchProgress();
+    try {
+      log('🚀 开始批量' + menuItem + '推送：L ' + groupName + '（' +
+        devices.length + ' 台设备，发送总数>' + BATCH_SEND_TOTAL + '）');
+      for (let i = 0; i < devices.length; i++) {
+        const dev = devices[i];
+        prog('📋 批量' + menuItem + '（' + groupName + '）' +
+          (i + 1) + '/' + devices.length + ' — 设备 ' + dev + '：设置筛选…');
+
+        // 1) 设备筛选 = 仅这台设备
+        const okDev = await syncDropdown('设备', (t) => t === dev);
+        if (!okDev) { log('⚠️ 设备 ' + dev + ' 筛选设置失败，跳过'); continue; }
+
+        // 2) 发送总数 = 500，规则切为 >
+        const c = findSendTotalControls();
+        if (c && c.input) setInputValue(c.input, String(BATCH_SEND_TOTAL));
+        else log('⚠️ 未找到发送总数输入框');
+        const okRule = await setSendTotalRule(BATCH_RULE);
+        if (!okRule) log('⚠️ 发送总数规则切换失败，结果可能不含 >' + BATCH_SEND_TOTAL + ' 条件');
+
+        // 3) 查询
+        clickSearchButton();
+        await sleep(2000); // 等列表刷新
+
+        // 4) 点推送
+        let pushBtn = null;
+        for (const b of document.querySelectorAll('button')) {
+          if (b.textContent.trim() === '推送') { pushBtn = b; break; }
+        }
+        if (!pushBtn) { log('⚠️ 设备 ' + dev + ': 未找到「推送」按钮，跳过'); continue; }
+        if (pushBtn.disabled) {
+          log('ℹ️ 设备 ' + dev + ': 无符合条件的数据（推送按钮不可用），跳过');
+          continue;
+        }
+        prog('📋 批量' + menuItem + '（' + groupName + '）' +
+          (i + 1) + '/' + devices.length + ' — 设备 ' + dev + '：打开推送弹窗…');
+        pushBtn.click();
+        const dlg = await waitForPushDialog();
+        if (!dlg) { log('⚠️ 设备 ' + dev + ': 推送弹窗未弹出，跳过'); continue; }
+
+        // 5) 推送类型
+        const okType = await setPushTypeInDialog(dlg, pushType);
+        if (!okType) {
+          log('⚠️ 设备 ' + dev + ': 推送类型设置失败，请人工处理当前弹窗');
+          await waitForDialogClose();
+          continue;
+        }
+
+        // 6) 等人工点确定/取消（弹窗消失 = 处理完，继续下一台）
+        prog('⏳ 批量' + menuItem + '（' + groupName + '）' +
+          (i + 1) + '/' + devices.length + ' — 设备 ' + dev +
+          '：等待人工确认（确定/取消）…');
+        await waitForDialogClose();
+        log('✅ 设备 ' + dev + ' 处理完成（' + (i + 1) + '/' + devices.length + '）');
+        await sleep(500);
+      }
+      prog('🎉 批量' + menuItem + '（' + groupName + '）全部设备处理完毕');
+      log('🎉 批量' + menuItem + '推送流程结束');
+    } finally {
+      batchRunning = false;
+      busy = false;
+      setTimeout(removeBatchProgress, 4000);
+    }
+  }
+
   function makeBtn(name, devices) {
+    // 外层容器承载 hover 下拉（换卡/买套餐），内层是原快选按钮
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:relative;display:inline-block;';
+
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = name;
-    b.title = '设备筛选: ' + devices.join(', ');
+    b.title = '设备筛选: ' + devices.join(', ') + '\n悬停可选「换卡 / 买套餐」批量推送';
     b.style.cssText =
       'padding:5px 16px;font-size:13px;border:1px solid #dcdfe6;border-radius:4px;' +
-      'background:#fff;color:#606266;cursor:pointer;transition:all .15s;';
-    b.addEventListener('mouseenter', () => {
+      'background:#fff;color:#606266;cursor:pointer;transition:all .15s;display:block;';
+    const hoverOn = () => {
       b.style.color = '#409eff';
       b.style.borderColor = '#c6e2ff';
       b.style.background = '#ecf5ff';
-    });
-    b.addEventListener('mouseleave', () => {
+    };
+    const hoverOff = () => {
       b.style.color = '#606266';
       b.style.borderColor = '#dcdfe6';
       b.style.background = '#fff';
-    });
+    };
+    b.addEventListener('mouseenter', hoverOn);
+    b.addEventListener('mouseleave', hoverOff);
     b.addEventListener('click', () => applyGroup(devices, name));
-    return b;
+    wrap.appendChild(b);
+
+    // hover 下拉：换卡 / 买套餐（批量推送流程）
+    const menu = document.createElement('div');
+    menu.style.cssText =
+      'display:none;position:absolute;top:100%;left:0;z-index:9999;min-width:88px;' +
+      'background:#fff;border:1px solid #e4e7ed;border-radius:4px;padding:4px 0;' +
+      'box-shadow:0 4px 12px rgba(0,0,0,.12);';
+    let hideTimer = null;
+    const showMenu = () => {
+      clearTimeout(hideTimer);
+      menu.style.display = 'block';
+      hoverOn();
+    };
+    const scheduleHide = () => {
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => {
+        menu.style.display = 'none';
+        hoverOff();
+      }, 250); // 延迟收起，留出移到下拉的时间
+    };
+    wrap.addEventListener('mouseenter', showMenu);
+    wrap.addEventListener('mouseleave', scheduleHide);
+    for (const item of ['换卡', '买套餐']) {
+      const mi = document.createElement('div');
+      mi.textContent = item + '推送';
+      mi.title = '逐台设备: 筛选设备 + 发送总数>' + BATCH_SEND_TOTAL + ' → 查询 → 推送（' + (MENU_PUSH_TYPE[item] || item) + '）→ 等人工确认';
+      mi.style.cssText =
+        'padding:6px 14px;font-size:12px;color:#606266;cursor:pointer;white-space:nowrap;';
+      mi.addEventListener('mouseenter', () => {
+        mi.style.background = '#ecf5ff';
+        mi.style.color = '#409eff';
+      });
+      mi.addEventListener('mouseleave', () => {
+        mi.style.background = '';
+        mi.style.color = '';
+      });
+      mi.addEventListener('click', (e) => {
+        e.stopPropagation();
+        menu.style.display = 'none';
+        runBatch(name, item);
+      });
+      menu.appendChild(mi);
+    }
+    wrap.appendChild(menu);
+    return wrap;
   }
 
   function buildBar() {
@@ -812,5 +1071,5 @@
     start();
   }
 
-  log('v1.7.2 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.8 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
