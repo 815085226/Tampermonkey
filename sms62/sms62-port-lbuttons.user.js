@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.8.0
+// @version      1.8.1
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -774,6 +774,27 @@
     return true;
   }
 
+  // 全选当前查询结果（点击表头复选框）。返回是否成功勾选到数据
+  async function selectAllQueryRows() {
+    // 已有选中行则直接认为可用
+    if (document.querySelector('.el-table__body-wrapper .el-checkbox__input.is-checked')) {
+      return true;
+    }
+    const headerCb = document.querySelector(
+      '.el-table__header-wrapper .el-table__cell .el-checkbox'
+    );
+    if (!headerCb) { log('未找到表头全选复选框'); return false; }
+    const input = headerCb.querySelector('input');
+    fireClick(input || headerCb);
+    await sleep(500);
+    const ok = !!document.querySelector(
+      '.el-table__body-wrapper .el-checkbox__input.is-checked'
+    );
+    if (ok) log('已自动全选查询结果');
+    else log('全选后未检测到选中行（可能查询结果为空）');
+    return ok;
+  }
+
   function findPushDialog() {
     for (const dlg of document.querySelectorAll('.el-dialog')) {
       const t = dlg.querySelector('.el-dialog__title');
@@ -881,6 +902,14 @@
         // 3) 查询
         clickSearchButton();
         await sleep(2000); // 等列表刷新
+
+        // 3.5) 自动勾选查询结果（推送按钮要求先选中行）
+        const selected = await selectAllQueryRows();
+        if (!selected) {
+          log('ℹ️ 设备 ' + dev + ': 没有可勾选的查询结果（发送总数>' +
+            BATCH_SEND_TOTAL + ' 无数据），跳过');
+          continue;
+        }
 
         // 4) 点推送
         let pushBtn = null;
@@ -1071,5 +1100,5 @@
     start();
   }
 
-  log('v1.8 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.8.1 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
