@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.7.0
+// @version      1.7.1
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -522,7 +522,7 @@
 
   // 把报表插到筛选栏（.toolbar）与列表（.panel）之间
   function tryInsertReport() {
-    if (!onTargetPage()) return;
+    if (!onReportPage()) return;
     if (document.getElementById(REPORT_ID)) return;
     const page = document.querySelector('.page');
     const firstPanel = page && page.querySelector('.panel');
@@ -537,6 +537,15 @@
     return (
       location.pathname.includes(PATH_KEYWORD) ||
       location.hash.includes(PATH_KEYWORD)
+    );
+  }
+
+  // 报表只在 /mkt/port 显示；/mkt/port-group 等子路径不显示
+  const REPORT_EXCLUDE_KEYWORDS = ['/mkt/port-group'];
+  function onReportPage() {
+    if (!onTargetPage()) return false;
+    return !REPORT_EXCLUDE_KEYWORDS.some(
+      (k) => location.pathname.includes(k) || location.hash.includes(k)
     );
   }
 
@@ -772,7 +781,7 @@
     tryInsert();
     tryInsertReport();
     loadConfig(); // 异步拉取业务配置，成功后自动刷新按钮
-    if (onTargetPage()) {
+    if (onReportPage()) {
       fetchAllPorts().catch(() => {}); // 提前预取端口数据，与页面渲染并行
     }
   }
@@ -782,5 +791,5 @@
     start();
   }
 
-  log('v1.7 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.7.1 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
