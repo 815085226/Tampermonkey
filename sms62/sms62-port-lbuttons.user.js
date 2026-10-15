@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.7.1
+// @version      1.7.2
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -268,7 +268,8 @@
     span.addEventListener('mouseleave', () => (span.style.textDecoration = 'none'));
     span.addEventListener('click', (e) => {
       e.stopPropagation();
-      applyFilters({ devices: devices || undefined, statusLabel: label });
+      // 组行传设备数组=设为该组；汇总行传 null=清空设备筛选，保证结果与报表数字口径一致
+      applyFilters({ devices, statusLabel: label });
     });
     return span;
   }
@@ -628,11 +629,10 @@
     return false;
   }
 
-  const syncSelection = (dd, devices) =>
-    syncSelectionBy(dd, (t) => matchDevice(t, devices));
-
   // 打开某 label 对应的下拉框、按 wantFn 同步选中项、收起（整个流程）
-  async function syncDropdown(labelText, wantFn) {
+  // ddMatcher: 从可见浮层中识别目标下拉的谓词（默认取含 wantFn 命中项的浮层；
+  //            清空场景 wantFn 永远不命中，需传入 (items) => true 取第一个有选项的浮层）
+  async function syncDropdown(labelText, wantFn, ddMatcher) {
     const sel = findSelectAfter(labelText);
     if (!sel) { log('未找到「' + labelText + '」下拉框'); return false; }
     const wrapper = sel.querySelector('.el-select__wrapper') || sel;
@@ -642,12 +642,16 @@
     fireClick(wrapper);
     await sleep(400);
 
-    // 找"已打开且包含目标选项"的下拉浮层（浮层 teleport 到 body）
+    const matchDd =
+      ddMatcher ||
+      ((items) => items.some((it) => wantFn(it.textContent.trim())));
+
+    // 找"已打开且符合条件"的下拉浮层（浮层 teleport 到 body）
     let dd = null;
     for (const d of document.querySelectorAll('.el-select-dropdown')) {
       if (d.offsetParent === null) continue;
       const items = [...d.querySelectorAll('.el-select-dropdown__item')];
-      if (items.some((it) => wantFn(it.textContent.trim()))) { dd = d; break; }
+      if (items.length && matchDd(items)) { dd = d; break; }
     }
     if (!dd) {
       document.body.click();
@@ -665,23 +669,40 @@
 
   let busy = false;
 
-  // 一键应用筛选：devices=设备组（可空），statusLabel=状态名（可空），完成后点一次查询
+  // 一键应用筛选，完成后点一次查询。devices 语义：
+  //   数组   = 设备筛选设为该组
+  //   null   = 清空设备筛选（汇总场景，保证结果与报表口径一致）
+  //   undefined = 不动设备筛选
   async function applyFilters({ devices, statusLabel }) {
     if (busy) return;
     busy = true;
     try {
       let ok = true;
-      if (devices) {
-        ok = (await syncDropdown('设备', (t) => matchDevice(t, devices))) && ok;
+      if (devices !== undefined) {
+        const wantFn = devices
+          ? (t) => matchDevice(t, devices)
+          : () => false; // 清空：取消所有已选设备
+        ok =
+          (await syncDropdown('设备', wantFn, devices ? undefined : () => true)) &&
+          ok;
       }
       if (statusLabel) {
         ok =
           (await syncDropdown('状态', (t) => t === statusLabel)) && ok;
       }
       if (ok) {
-        const desc =
-          (devices ? '设备=' + Object.keys(GROUPS_CURRENT).find((k) => GROUPS_CURRENT[k] === devices) + ' ' : '') +
-          (statusLabel ? '状态=' + statusLabel : '');
+        let desc = '';
+        if (Array.isArray(devices)) {
+          desc +=
+            '设备=' +
+            (Object.keys(GROUPS_CURRENT).find(
+              (k) => GROUPS_CURRENT[k] === devices
+            ) || '?') +
+            ' ';
+        } else if (devices === null) {
+          desc += '设备=全部 ';
+        }
+        if (statusLabel) desc += '状态=' + statusLabel;
         log('✅ 已应用筛选 ' + desc);
         if (AUTO_SEARCH) clickSearchButton();
       }
@@ -791,5 +812,5 @@
     start();
   }
 
-  log('v1.7.1 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.7.2 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
