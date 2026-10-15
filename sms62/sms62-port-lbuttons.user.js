@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.6.0
+// @version      1.6.1
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -149,21 +149,71 @@
     return res.json();
   }
 
-  // 拉全量端口数据（分页循环，最多 20 页兜底）
-  async function fetchAllPorts() {
-    const all = [];
-    const pageSize = 500;
-    for (let pageNum = 1; pageNum <= 20; pageNum++) {
-      const json = await apiGet(
-        PORT_LIST_API + '?pageNum=' + pageNum + '&pageSize=' + pageSize
-      );
-      if (json.code !== undefined && json.code !== 200) throw new Error(json.msg || ('code ' + json.code));
-      const rows = json.rows || json.data?.rows || [];
-      all.push(...rows);
-      const total = json.total ?? json.data?.total ?? all.length;
-      if (all.length >= total || rows.length === 0) break;
+  // 拉全量端口数据：先取第 1 页拿 total，剩余页并行请求（比串行快数倍）
+  const REPORT_CACHE_KEY = 'gavin-lreport-cache-v1';
+  const REPORT_CACHE_TTL = 5 * 60 * 1000; // 缓存 5 分钟
+  let reportDataPromise = null; // 进行中的拉取请求（防重复）
+
+  function readCache() {
+    try {
+      const c = JSON.parse(sessionStorage.getItem(REPORT_CACHE_KEY) || 'null');
+      if (c && Date.now() - c.ts < REPORT_CACHE_TTL && Array.isArray(c.rows)) return c;
+    } catch (e) { /* 缓存损坏则忽略 */ }
+    return null;
+  }
+
+  function writeCache(rows) {
+    try {
+      // 只保留统计需要的 3 个字段，避免超出 sessionStorage 容量
+      const slim = rows.map((r) => ({
+        d: String(r.deviceName ?? ''), // 设备名
+        t: Number(r.totalSend) || 0,   // 发送总数
+        s: r.status,                   // 状态
+      }));
+      sessionStorage.setItem(REPORT_CACHE_KEY, JSON.stringify({ ts: Date.now(), rows: slim }));
+    } catch (e) { /* 存不下就算了 */ }
+  }
+
+  function fetchPortPage(pageNum, pageSize) {
+    return apiGet(PORT_LIST_API + '?pageNum=' + pageNum + '&pageSize=' + pageSize);
+  }
+
+  async function fetchAllPorts(force) {
+    if (!force) {
+      const cached = readCache();
+      if (cached) {
+        log('报表使用本地缓存（' + Math.round((Date.now() - cached.ts) / 1000) + ' 秒前），点「刷新报表」强制更新');
+        return cached.rows;
+      }
     }
-    return all;
+    if (reportDataPromise) return reportDataPromise;
+
+    reportDataPromise = (async () => {
+      const pageSize = 1000; // 大页减少请求轮数
+      const first = await fetchPortPage(1, pageSize);
+      if (first.code !== undefined && first.code !== 200) throw new Error(first.msg || ('code ' + first.code));
+      const rows = [...(first.rows || first.data?.rows || [])];
+      const total = first.total ?? first.data?.total ?? rows.length;
+      const pages = Math.min(Math.ceil(total / pageSize) || 1, 20);
+
+      // 第 2..N 页并行拉取
+      if (pages > 1) {
+        const rest = await Promise.all(
+          Array.from({ length: pages - 1 }, (_, i) =>
+            fetchPortPage(i + 2, pageSize).catch(() => ({ rows: [] }))
+          )
+        );
+        for (const j of rest) rows.push(...(j.rows || j.data?.rows || []));
+      }
+      writeCache(rows);
+      return rows;
+    })();
+
+    try {
+      return await reportDataPromise;
+    } finally {
+      reportDataPromise = null;
+    }
   }
 
   async function loadStatusDict() {
@@ -183,14 +233,15 @@
     const stats = [];
     for (const [name, devices] of Object.entries(GROUPS_CURRENT)) {
       const groupRows = rows.filter((r) =>
-        matchDevice(String(r.deviceName ?? '').trim(), devices)
+        // 兼容两种行结构：接口原始行 / 本地缓存的精简行（d/t/s）
+        matchDevice(String(r.d ?? r.deviceName ?? '').trim(), devices)
       );
       const over500 = groupRows.filter(
-        (r) => Number(r.totalSend) > OVER500_THRESHOLD
+        (r) => Number(r.t ?? r.totalSend) > OVER500_THRESHOLD
       ).length;
       const statusMap = {};
       for (const r of groupRows) {
-        const k = statusLabel(r.status);
+        const k = statusLabel(r.s ?? r.status);
         statusMap[k] = (statusMap[k] || 0) + 1;
       }
       stats.push({
@@ -263,7 +314,7 @@
     return wrap;
   }
 
-  async function refreshReport() {
+  async function refreshReport(force) {
     const body = document.getElementById(REPORT_ID + '-body');
     const tip = document.getElementById(REPORT_ID + '-tip');
     if (!body) return;
@@ -271,7 +322,7 @@
       tip.textContent = '加载中…';
       tip.style.display = 'block';
       if (!Object.keys(statusDict).length) await loadStatusDict();
-      const rows = await fetchAllPorts();
+      const rows = await fetchAllPorts(force);
       const stats = buildStats(rows);
       body.innerHTML = '';
       body.appendChild(buildReportTable(stats));
@@ -308,7 +359,7 @@
       'background:#fff;color:#606266;cursor:pointer;';
     refreshBtn.addEventListener('click', (e) => {
       e.stopPropagation(); // 不触发折叠
-      refreshReport();
+      refreshReport(true); // 手动点击 = 强制绕过缓存
     });
     const arrow = document.createElement('span');
     arrow.style.cssText = 'font-size:12px;color:#909399;transition:transform .2s;';
@@ -577,6 +628,9 @@
     tryInsert();
     tryInsertReport();
     loadConfig(); // 异步拉取业务配置，成功后自动刷新按钮
+    if (onTargetPage()) {
+      fetchAllPorts().catch(() => {}); // 提前预取端口数据，与页面渲染并行
+    }
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', start);
@@ -584,5 +638,5 @@
     start();
   }
 
-  log('v1.6 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.6.1 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
