@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.8.1
+// @version      1.8.2
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -715,13 +715,12 @@
     await applyFilters({ devices });
   }
 
-  // ===== 批量推送（换卡/买套餐）：hover L 按钮下拉触发 =====
+  // ===== 批量推送（换卡）：hover L 按钮下拉触发 =====
   const BATCH_SEND_TOTAL = 500;          // 批量流程使用的发送总数阈值
   const BATCH_RULE = '>';                // 发送总数规则（页面默认是"<"，需切为">"）
-  // hover 菜单项 → 弹窗里「推送类型」选项的映射（买套餐对应项如需调整改这里）
+  // 菜单项 → 弹窗里「推送类型」选项的映射
   const MENU_PUSH_TYPE = {
     '换卡': '换卡',
-    '买套餐': '等下用',
   };
 
   function findSendTotalControls() {
@@ -953,14 +952,14 @@
   }
 
   function makeBtn(name, devices) {
-    // 外层容器承载 hover 下拉（换卡/买套餐），内层是原快选按钮
+    // 外层容器承载 hover 下拉（换卡推送），内层是原快选按钮
     const wrap = document.createElement('div');
     wrap.style.cssText = 'position:relative;display:inline-block;';
 
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = name;
-    b.title = '设备筛选: ' + devices.join(', ') + '\n悬停可选「换卡 / 买套餐」批量推送';
+    b.title = '设备筛选: ' + devices.join(', ') + '\n悬停可选「换卡推送」批量流程';
     b.style.cssText =
       'padding:5px 16px;font-size:13px;border:1px solid #dcdfe6;border-radius:4px;' +
       'background:#fff;color:#606266;cursor:pointer;transition:all .15s;display:block;';
@@ -979,7 +978,7 @@
     b.addEventListener('click', () => applyGroup(devices, name));
     wrap.appendChild(b);
 
-    // hover 下拉：换卡 / 买套餐（批量推送流程）
+    // hover 下拉：换卡推送（批量流程）
     const menu = document.createElement('div');
     menu.style.cssText =
       'display:none;position:absolute;top:100%;left:0;z-index:9999;min-width:88px;' +
@@ -1000,7 +999,7 @@
     };
     wrap.addEventListener('mouseenter', showMenu);
     wrap.addEventListener('mouseleave', scheduleHide);
-    for (const item of ['换卡', '买套餐']) {
+    for (const item of ['换卡']) {
       const mi = document.createElement('div');
       mi.textContent = item + '推送';
       mi.title = '逐台设备: 筛选设备 + 发送总数>' + BATCH_SEND_TOTAL + ' → 查询 → 推送（' + (MENU_PUSH_TYPE[item] || item) + '）→ 等人工确认';
@@ -1100,5 +1099,5 @@
     start();
   }
 
-  log('v1.8.1 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.8.2 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
