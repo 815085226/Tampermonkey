@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.8.4
+// @version      1.8.5
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -242,12 +242,11 @@
         (r) => Number(r.t ?? r.totalSend) > over500Threshold
       ).length;
       const statusMap = {};
-      const pkgMap = {};
+      let pkgSum = 0; // 套餐汇总总数（组内 pkgs 求和）
       for (const r of groupRows) {
         const k = statusLabel(r.s ?? r.status);
         statusMap[k] = (statusMap[k] || 0) + 1;
-        const pkg = String(r.p ?? r.pkgs ?? '').trim();
-        if (pkg) pkgMap[pkg] = (pkgMap[pkg] || 0) + 1;
+        pkgSum += Number(r.p ?? r.pkgs) || 0;
       }
       stats.push({
         name,
@@ -255,7 +254,7 @@
         total: groupRows.length,
         over500,
         statusMap,
-        pkgMap,
+        pkgSum,
       });
     }
     return stats;
@@ -279,16 +278,6 @@
     return span;
   }
 
-  // 套餐标签（灰色，仅展示；套餐在筛选栏没有对应过滤条件，不做点击筛选）
-  function makePkgChip(label, count) {
-    const span = document.createElement('span');
-    span.style.cssText =
-      'display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:3px;' +
-      'background:#f4f4f5;color:#909399;font-size:12px;white-space:nowrap;';
-    span.innerHTML = label + ': <b>' + count + '</b>';
-    return span;
-  }
-
   function buildReportTable(stats) {
     const wrap = document.createElement('div');
     wrap.style.cssText = 'padding:10px 14px;overflow-x:auto;';
@@ -299,7 +288,7 @@
     const thead = document.createElement('thead');
     thead.innerHTML =
       '<tr>' +
-      ['分组', '端口总数', '套餐分布', '发送总数&gt;' + over500Threshold, '状态分布']
+      ['分组', '端口总数', '套餐总数', '发送总数&gt;' + over500Threshold, '状态分布']
         .map(
           (h) =>
             '<th style="border:1px solid #ebeef5;background:#f5f7fa;padding:8px 12px;' +
@@ -339,20 +328,10 @@
       tdTotal.style.cssText = 'border:1px solid #ebeef5;padding:8px 12px;';
       tdTotal.textContent = s.total;
 
-      // 套餐分布（按数量降序）
+      // 套餐汇总总数（组内 pkgs 求和）
       const pkgTd = document.createElement('td');
       pkgTd.style.cssText = 'border:1px solid #ebeef5;padding:8px 12px;';
-      const pkgEntries = Object.entries(s.pkgMap).sort((a, b) => b[1] - a[1]);
-      if (!pkgEntries.length) {
-        const none = document.createElement('span');
-        none.style.cssText = 'color:#c0c4cc';
-        none.textContent = '无套餐';
-        pkgTd.appendChild(none);
-      } else {
-        for (const [label, count] of pkgEntries) {
-          pkgTd.appendChild(makePkgChip(label, count));
-        }
-      }
+      pkgTd.textContent = s.pkgSum;
 
       const tdOver = document.createElement('td');
       tdOver.style.cssText =
@@ -376,15 +355,13 @@
       const sumMap = {};
       let sumTotal = 0;
       let sumOver500 = 0;
-      const sumPkgMap = {};
+      let sumPkg = 0;
       for (const s of stats) {
         sumTotal += s.total;
         sumOver500 += s.over500;
+        sumPkg += s.pkgSum;
         for (const [label, count] of Object.entries(s.statusMap)) {
           sumMap[label] = (sumMap[label] || 0) + count;
-        }
-        for (const [label, count] of Object.entries(s.pkgMap)) {
-          sumPkgMap[label] = (sumPkgMap[label] || 0) + count;
         }
       }
 
@@ -398,21 +375,11 @@
         'border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;';
       tdTotal.textContent = sumTotal;
 
-      // 套餐汇总（跨组合计）
+      // 套餐汇总总数（跨组合计）
       const pkgTd = document.createElement('td');
       pkgTd.style.cssText =
-        'border:1px solid #ebeef5;padding:8px 12px;background:#fafafa;';
-      const sumPkgEntries = Object.entries(sumPkgMap).sort((a, b) => b[1] - a[1]);
-      if (!sumPkgEntries.length) {
-        const none = document.createElement('span');
-        none.style.cssText = 'color:#c0c4cc';
-        none.textContent = '无套餐';
-        pkgTd.appendChild(none);
-      } else {
-        for (const [label, count] of sumPkgEntries) {
-          pkgTd.appendChild(makePkgChip(label, count));
-        }
-      }
+        'border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;';
+      pkgTd.textContent = sumPkg;
 
       const tdOver = document.createElement('td');
       tdOver.style.cssText =
@@ -1186,5 +1153,5 @@
     start();
   }
 
-  log('v1.8.4 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.8.5 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
