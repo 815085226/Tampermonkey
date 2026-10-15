@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.6.2
+// @version      1.6.3
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -28,7 +28,8 @@
   const PORT_LIST_API = '/prod-api/business/port/list';           // 端口列表（rows/total 分页）
   const STATUS_DICT_API = '/prod-api/system/dict/data/type/sys_port_status'; // 端口状态字典
   const REPORT_ID = 'gavin-lreport';
-  const OVER500_THRESHOLD = 500; // 发送总数阈值
+  let over500Threshold = 500; // 发送总数阈值（可在报表头部输入框调整）
+  let lastRows = [];          // 最近一次拉到的端口数据，调整阈值时免重新请求
 
   const BAR_ID = 'gavin-lbar';
   const log = (...a) =>
@@ -237,7 +238,7 @@
         matchDevice(String(r.d ?? r.deviceName ?? '').trim(), devices)
       );
       const over500 = groupRows.filter(
-        (r) => Number(r.t ?? r.totalSend) > OVER500_THRESHOLD
+        (r) => Number(r.t ?? r.totalSend) > over500Threshold
       ).length;
       const statusMap = {};
       for (const r of groupRows) {
@@ -265,7 +266,7 @@
     const thead = document.createElement('thead');
     thead.innerHTML =
       '<tr>' +
-      ['分组', '端口总数', '发送总数&gt;' + OVER500_THRESHOLD, '状态分布']
+      ['分组', '端口总数', '发送总数&gt;' + over500Threshold, '状态分布']
         .map(
           (h) =>
             '<th style="border:1px solid #ebeef5;background:#f5f7fa;padding:8px 12px;' +
@@ -348,6 +349,14 @@
     return wrap;
   }
 
+  // 阈值调整后用本地已拉取的数据即时重渲染（不重新发请求）
+  function rebuildReportTable() {
+    const body = document.getElementById(REPORT_ID + '-body');
+    if (!body || !lastRows.length) return; // 数据还没拉到时等首次加载
+    body.innerHTML = '';
+    body.appendChild(buildReportTable(buildStats(lastRows)));
+  }
+
   async function refreshReport(force) {
     const body = document.getElementById(REPORT_ID + '-body');
     const tip = document.getElementById(REPORT_ID + '-tip');
@@ -357,6 +366,7 @@
       tip.style.display = 'block';
       if (!Object.keys(statusDict).length) await loadStatusDict();
       const rows = await fetchAllPorts(force);
+      lastRows = rows;
       const stats = buildStats(rows);
       body.innerHTML = '';
       body.appendChild(buildReportTable(stats));
@@ -382,9 +392,43 @@
       'padding:10px 14px;cursor:pointer;user-select:none;background:#f5f7fa;';
     const title = document.createElement('div');
     title.style.cssText = 'font-weight:600;font-size:14px;color:#303133;';
-    title.textContent = '📊 L 组数据报表（发送总数>' + OVER500_THRESHOLD + ' / 状态分布）';
+    const titleText = () =>
+      '📊 L 组数据报表（发送总数>' + over500Threshold + ' / 状态分布）';
+    title.textContent = titleText();
+
     const ops = document.createElement('div');
     ops.style.cssText = 'display:flex;align-items:center;gap:8px;';
+
+    // 阈值输入：调整"发送总数>N"的 N，改动后用本地数据即时重算（不发请求）
+    const thLabel = document.createElement('span');
+    thLabel.style.cssText = 'font-size:12px;color:#909399;';
+    thLabel.textContent = '发送总数＞';
+    const thInput = document.createElement('input');
+    thInput.type = 'number';
+    thInput.min = '0';
+    thInput.step = '1';
+    thInput.value = over500Threshold;
+    thInput.title = '调整阈值后立即重新统计';
+    thInput.style.cssText =
+      'width:76px;padding:3px 6px;font-size:12px;border:1px solid #dcdfe6;' +
+      'border-radius:4px;color:#606266;outline:none;';
+    const applyThreshold = () => {
+      const v = parseInt(thInput.value, 10);
+      if (isNaN(v) || v < 0) { thInput.value = over500Threshold; return; }
+      if (v === over500Threshold) return;
+      over500Threshold = v;
+      title.textContent = titleText();
+      rebuildReportTable(); // 用已拉取的数据重算，无需重新请求
+      log('阈值已调整为 发送总数>' + over500Threshold + '，报表已重新统计');
+    };
+    thInput.addEventListener('change', applyThreshold);
+    thInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') thInput.blur(); // 回车确认
+    });
+    thInput.addEventListener('click', (e) => e.stopPropagation()); // 不触发折叠
+    ops.appendChild(thLabel);
+    ops.appendChild(thInput);
+
     const refreshBtn = document.createElement('button');
     refreshBtn.type = 'button';
     refreshBtn.textContent = '刷新报表';
@@ -672,5 +716,5 @@
     start();
   }
 
-  log('v1.6.2 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.6.3 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
