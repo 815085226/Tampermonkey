@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.5.0
-// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（L1~L5，组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组
+// @version      1.6.0
+// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
 // @match        https://web.sms62.com/*
@@ -25,6 +25,10 @@
   const PATH_KEYWORD = '/mkt/port';
   const CONFIG_API = '/prod-api/manage/sysCconfig/list?pageNum=1&pageSize=200';
   const CONFIG_KEY = 'LOCATION:DEVICES:CONFIG'; // 仅用于日志提示
+  const PORT_LIST_API = '/prod-api/business/port/list';           // 端口列表（rows/total 分页）
+  const STATUS_DICT_API = '/prod-api/system/dict/data/type/sys_port_status'; // 端口状态字典
+  const REPORT_ID = 'gavin-lreport';
+  const OVER500_THRESHOLD = 500; // 发送总数阈值
 
   const BAR_ID = 'gavin-lbar';
   const log = (...a) =>
@@ -121,6 +125,7 @@
             configLoaded = true;
             log('✅ 已从业务配置 ' + CONFIG_KEY + ' 加载设备分组:', JSON.stringify(GROUPS_CURRENT));
             refreshBar(); // 配置到位后重建按钮（组名/数量可能变化）
+            if (document.getElementById(REPORT_ID)) refreshReport(); // 报表按新分组重算
             return;
           }
           log('接口返回中未找到 ' + CONFIG_KEY + ' 配置值，使用内置兜底配置');
@@ -133,7 +138,221 @@
     if (!configLoaded) log('⚠️ 配置拉取未成功，继续使用内置兜底配置');
   }
 
-  // ===== 页面交互辅助 =====
+  // ===== L 组数据报表：筛选栏与列表之间的可折叠面板 =====
+  let statusDict = {}; // status 值 -> 标签
+
+  async function apiGet(url) {
+    const res = await _fetch(url, {
+      headers: AUTH ? { Authorization: AUTH } : {},
+      credentials: 'include',
+    });
+    return res.json();
+  }
+
+  // 拉全量端口数据（分页循环，最多 20 页兜底）
+  async function fetchAllPorts() {
+    const all = [];
+    const pageSize = 500;
+    for (let pageNum = 1; pageNum <= 20; pageNum++) {
+      const json = await apiGet(
+        PORT_LIST_API + '?pageNum=' + pageNum + '&pageSize=' + pageSize
+      );
+      if (json.code !== undefined && json.code !== 200) throw new Error(json.msg || ('code ' + json.code));
+      const rows = json.rows || json.data?.rows || [];
+      all.push(...rows);
+      const total = json.total ?? json.data?.total ?? all.length;
+      if (all.length >= total || rows.length === 0) break;
+    }
+    return all;
+  }
+
+  async function loadStatusDict() {
+    try {
+      const json = await apiGet(STATUS_DICT_API);
+      const list = json.data || [];
+      statusDict = {};
+      for (const d of list) statusDict[String(d.dictValue)] = d.dictLabel;
+    } catch (e) {
+      log('状态字典拉取失败，报表将直接显示状态原始值');
+    }
+  }
+
+  const statusLabel = (v) => statusDict[String(v)] || String(v ?? '未知');
+
+  function buildStats(rows) {
+    const stats = [];
+    for (const [name, devices] of Object.entries(GROUPS_CURRENT)) {
+      const groupRows = rows.filter((r) =>
+        matchDevice(String(r.deviceName ?? '').trim(), devices)
+      );
+      const over500 = groupRows.filter(
+        (r) => Number(r.totalSend) > OVER500_THRESHOLD
+      ).length;
+      const statusMap = {};
+      for (const r of groupRows) {
+        const k = statusLabel(r.status);
+        statusMap[k] = (statusMap[k] || 0) + 1;
+      }
+      stats.push({
+        name,
+        devices,
+        total: groupRows.length,
+        over500,
+        statusMap,
+      });
+    }
+    return stats;
+  }
+
+  function buildReportTable(stats) {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'padding:10px 14px;overflow-x:auto;';
+
+    const tbl = document.createElement('table');
+    tbl.style.cssText =
+      'border-collapse:collapse;font-size:13px;min-width:640px;width:100%;';
+    const thead = document.createElement('thead');
+    thead.innerHTML =
+      '<tr>' +
+      ['分组', '端口总数', '发送总数&gt;' + OVER500_THRESHOLD, '状态分布']
+        .map(
+          (h) =>
+            '<th style="border:1px solid #ebeef5;background:#f5f7fa;padding:8px 12px;' +
+            'text-align:left;font-weight:600;color:#606266;white-space:nowrap;">' +
+            h +
+            '</th>'
+        )
+        .join('') +
+      '</tr>';
+    tbl.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    for (const s of stats) {
+      const tr = document.createElement('tr');
+      // 状态分布：按数量降序的彩色标签
+      const chips = Object.entries(s.statusMap)
+        .sort((a, b) => b[1] - a[1])
+        .map(
+          ([label, count]) =>
+            '<span style="display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;' +
+            'border-radius:3px;background:#ecf5ff;color:#409eff;font-size:12px;">' +
+            label + ': <b>' + count + '</b></span>'
+        )
+        .join(' ') || '<span style="color:#c0c4cc">无数据</span>';
+
+      tr.innerHTML =
+        '<td style="border:1px solid #ebeef5;padding:8px 12px;font-weight:600;">' + s.name + '</td>' +
+        '<td style="border:1px solid #ebeef5;padding:8px 12px;">' + s.total + '</td>' +
+        '<td style="border:1px solid #ebeef5;padding:8px 12px;' +
+        (s.over500 > 0 ? 'color:#f56c6c;font-weight:600;' : 'color:#909399;') +
+        '">' + s.over500 + '</td>' +
+        '<td style="border:1px solid #ebeef5;padding:8px 12px;">' + chips + '</td>';
+
+      // 悬浮提示展示组内设备清单
+      tr.title = s.name + ' 设备: ' + s.devices.join(', ');
+      tbody.appendChild(tr);
+    }
+    tbl.appendChild(tbody);
+    wrap.appendChild(tbl);
+
+    const foot = document.createElement('div');
+    foot.style.cssText = 'margin-top:8px;font-size:12px;color:#909399;';
+    foot.textContent =
+      '统计范围: 全部端口数据（设备归属按业务配置 ' + CONFIG_KEY + ' 划分），点击右上角「刷新报表」更新';
+    wrap.appendChild(foot);
+    return wrap;
+  }
+
+  async function refreshReport() {
+    const body = document.getElementById(REPORT_ID + '-body');
+    const tip = document.getElementById(REPORT_ID + '-tip');
+    if (!body) return;
+    try {
+      tip.textContent = '加载中…';
+      tip.style.display = 'block';
+      if (!Object.keys(statusDict).length) await loadStatusDict();
+      const rows = await fetchAllPorts();
+      const stats = buildStats(rows);
+      body.innerHTML = '';
+      body.appendChild(buildReportTable(stats));
+      tip.style.display = 'none';
+      log('✅ L 组报表已刷新（共 ' + rows.length + ' 条端口数据）');
+    } catch (e) {
+      tip.textContent = '报表加载失败: ' + (e && e.message);
+      log('报表加载失败:', e);
+    }
+  }
+
+  function buildReportPanel() {
+    const panel = document.createElement('div');
+    panel.id = REPORT_ID;
+    panel.style.cssText =
+      'margin:12px 0;border:1px solid #ebeef5;border-radius:6px;background:#fff;' +
+      'box-shadow:0 1px 3px rgba(0,0,0,.04);overflow:hidden;';
+
+    // 头部：标题 + 折叠/刷新
+    const head = document.createElement('div');
+    head.style.cssText =
+      'display:flex;align-items:center;justify-content:space-between;' +
+      'padding:10px 14px;cursor:pointer;user-select:none;background:#f5f7fa;';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-weight:600;font-size:14px;color:#303133;';
+    title.textContent = '📊 L 组数据报表（发送总数>' + OVER500_THRESHOLD + ' / 状态分布）';
+    const ops = document.createElement('div');
+    ops.style.cssText = 'display:flex;align-items:center;gap:8px;';
+    const refreshBtn = document.createElement('button');
+    refreshBtn.type = 'button';
+    refreshBtn.textContent = '刷新报表';
+    refreshBtn.style.cssText =
+      'padding:4px 12px;font-size:12px;border:1px solid #dcdfe6;border-radius:4px;' +
+      'background:#fff;color:#606266;cursor:pointer;';
+    refreshBtn.addEventListener('click', (e) => {
+      e.stopPropagation(); // 不触发折叠
+      refreshReport();
+    });
+    const arrow = document.createElement('span');
+    arrow.style.cssText = 'font-size:12px;color:#909399;transition:transform .2s;';
+    arrow.textContent = '▼';
+    ops.appendChild(refreshBtn);
+    ops.appendChild(arrow);
+    head.appendChild(title);
+    head.appendChild(ops);
+
+    // 折叠体
+    const body = document.createElement('div');
+    body.id = REPORT_ID + '-body';
+    body.style.cssText = 'display:block;';
+    const tip = document.createElement('div');
+    tip.id = REPORT_ID + '-tip';
+    tip.style.cssText = 'padding:14px;font-size:13px;color:#909399;';
+    tip.textContent = '待加载…';
+    body.appendChild(tip);
+
+    let collapsed = false;
+    head.addEventListener('click', () => {
+      collapsed = !collapsed;
+      body.style.display = collapsed ? 'none' : 'block';
+      arrow.style.transform = collapsed ? 'rotate(-90deg)' : '';
+    });
+
+    panel.appendChild(head);
+    panel.appendChild(body);
+    return panel;
+  }
+
+  // 把报表插到筛选栏（.toolbar）与列表（.panel）之间
+  function tryInsertReport() {
+    if (!onTargetPage()) return;
+    if (document.getElementById(REPORT_ID)) return;
+    const page = document.querySelector('.page');
+    const firstPanel = page && page.querySelector('.panel');
+    if (page && firstPanel) {
+      page.insertBefore(buildReportPanel(), firstPanel);
+      log('✅ L 组报表面板已插入（筛选栏与列表之间）');
+      refreshReport();
+    }
+  }
+
   function onTargetPage() {
     return (
       location.pathname.includes(PATH_KEYWORD) ||
@@ -344,14 +563,19 @@
 
   // SPA 路由切换 / 表格重渲染兜底轮询（站点重渲染筛选栏后自动补插）
   setInterval(tryInsert, 1500);
+  setInterval(tryInsertReport, 1500);
 
   // run-at document-start 时 body 可能还不存在，就绪后再挂观察器
   function start() {
-    new MutationObserver(() => tryInsert()).observe(document.body, {
+    new MutationObserver(() => {
+      tryInsert();
+      tryInsertReport();
+    }).observe(document.body, {
       childList: true,
       subtree: true,
     });
     tryInsert();
+    tryInsertReport();
     loadConfig(); // 异步拉取业务配置，成功后自动刷新按钮
   }
   if (document.readyState === 'loading') {
@@ -360,5 +584,5 @@
     start();
   }
 
-  log('v1.5 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.6 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
