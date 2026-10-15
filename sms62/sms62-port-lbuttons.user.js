@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.6.3
+// @version      1.7.0
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -256,6 +256,23 @@
     return stats;
   }
 
+  // 可点击的状态标签：点击数字 → 反向筛选主列表（设备组 + 状态）
+  function makeStatusChip(label, count, devices, style) {
+    const span = document.createElement('span');
+    span.style.cssText =
+      'display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:3px;' +
+      'font-size:12px;cursor:pointer;transition:all .15s;' + style;
+    span.innerHTML = label + ': <b>' + count + '</b>';
+    span.title = '点击筛选列表: ' + (devices ? '设备组内' : '全部设备') + ' + 状态=' + label;
+    span.addEventListener('mouseenter', () => (span.style.textDecoration = 'underline'));
+    span.addEventListener('mouseleave', () => (span.style.textDecoration = 'none'));
+    span.addEventListener('click', (e) => {
+      e.stopPropagation();
+      applyFilters({ devices: devices || undefined, statusLabel: label });
+    });
+    return span;
+  }
+
   function buildReportTable(stats) {
     const wrap = document.createElement('div');
     wrap.style.cssText = 'padding:10px 14px;overflow-x:auto;';
@@ -281,24 +298,40 @@
     const tbody = document.createElement('tbody');
     for (const s of stats) {
       const tr = document.createElement('tr');
-      // 状态分布：按数量降序的彩色标签
-      const chips = Object.entries(s.statusMap)
-        .sort((a, b) => b[1] - a[1])
-        .map(
-          ([label, count]) =>
-            '<span style="display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;' +
-            'border-radius:3px;background:#ecf5ff;color:#409eff;font-size:12px;">' +
-            label + ': <b>' + count + '</b></span>'
-        )
-        .join(' ') || '<span style="color:#c0c4cc">无数据</span>';
+      // 状态分布：按数量降序的可点击标签（点击 → 筛选该组 + 该状态）
+      const statusTd = document.createElement('td');
+      statusTd.style.cssText = 'border:1px solid #ebeef5;padding:8px 12px;';
+      const entries = Object.entries(s.statusMap).sort((a, b) => b[1] - a[1]);
+      if (!entries.length) {
+        const none = document.createElement('span');
+        none.style.cssText = 'color:#c0c4cc';
+        none.textContent = '无数据';
+        statusTd.appendChild(none);
+      } else {
+        for (const [label, count] of entries) {
+          statusTd.appendChild(
+            makeStatusChip(label, count, GROUPS_CURRENT[s.name],
+              'background:#ecf5ff;color:#409eff;')
+          );
+        }
+      }
 
-      tr.innerHTML =
-        '<td style="border:1px solid #ebeef5;padding:8px 12px;font-weight:600;">' + s.name + '</td>' +
-        '<td style="border:1px solid #ebeef5;padding:8px 12px;">' + s.total + '</td>' +
-        '<td style="border:1px solid #ebeef5;padding:8px 12px;' +
-        (s.over500 > 0 ? 'color:#f56c6c;font-weight:600;' : 'color:#909399;') +
-        '">' + s.over500 + '</td>' +
-        '<td style="border:1px solid #ebeef5;padding:8px 12px;">' + chips + '</td>';
+      const tdName = document.createElement('td');
+      tdName.style.cssText = 'border:1px solid #ebeef5;padding:8px 12px;font-weight:600;';
+      tdName.textContent = s.name;
+      const tdTotal = document.createElement('td');
+      tdTotal.style.cssText = 'border:1px solid #ebeef5;padding:8px 12px;';
+      tdTotal.textContent = s.total;
+      const tdOver = document.createElement('td');
+      tdOver.style.cssText =
+        'border:1px solid #ebeef5;padding:8px 12px;' +
+        (s.over500 > 0 ? 'color:#f56c6c;font-weight:600;' : 'color:#909399;');
+      tdOver.textContent = s.over500;
+
+      tr.appendChild(tdName);
+      tr.appendChild(tdTotal);
+      tr.appendChild(tdOver);
+      tr.appendChild(statusTd);
 
       // 悬浮提示展示组内设备清单
       tr.title = s.name + ' 设备: ' + s.devices.join(', ');
@@ -317,25 +350,43 @@
           sumMap[label] = (sumMap[label] || 0) + count;
         }
       }
-      const sumChips =
-        Object.entries(sumMap)
-          .sort((a, b) => b[1] - a[1])
-          .map(
-            ([label, count]) =>
-              '<span style="display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;' +
-              'border-radius:3px;background:#f0f9eb;color:#67c23a;font-size:12px;">' +
-              label + ': <b>' + count + '</b></span>'
-          )
-          .join(' ') || '<span style="color:#c0c4cc">无数据</span>';
 
       const sumTr = document.createElement('tr');
-      sumTr.innerHTML =
-        '<td style="border:1px solid #ebeef5;padding:8px 12px;font-weight:700;color:#303133;background:#fafafa;">汇总</td>' +
-        '<td style="border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;">' + sumTotal + '</td>' +
-        '<td style="border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;' +
-        (sumOver500 > 0 ? 'color:#f56c6c;' : 'color:#909399;') +
-        '">' + sumOver500 + '</td>' +
-        '<td style="border:1px solid #ebeef5;padding:8px 12px;background:#fafafa;">' + sumChips + '</td>';
+      const tdName = document.createElement('td');
+      tdName.style.cssText =
+        'border:1px solid #ebeef5;padding:8px 12px;font-weight:700;color:#303133;background:#fafafa;';
+      tdName.textContent = '汇总';
+      const tdTotal = document.createElement('td');
+      tdTotal.style.cssText =
+        'border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;';
+      tdTotal.textContent = sumTotal;
+      const tdOver = document.createElement('td');
+      tdOver.style.cssText =
+        'border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;' +
+        (sumOver500 > 0 ? 'color:#f56c6c;' : 'color:#909399;');
+      tdOver.textContent = sumOver500;
+      const statusTd = document.createElement('td');
+      statusTd.style.cssText =
+        'border:1px solid #ebeef5;padding:8px 12px;background:#fafafa;';
+      const sumEntries = Object.entries(sumMap).sort((a, b) => b[1] - a[1]);
+      if (!sumEntries.length) {
+        const none = document.createElement('span');
+        none.style.cssText = 'color:#c0c4cc';
+        none.textContent = '无数据';
+        statusTd.appendChild(none);
+      } else {
+        for (const [label, count] of sumEntries) {
+          // 汇总行点击 = 不限设备组，仅按状态筛选
+          statusTd.appendChild(
+            makeStatusChip(label, count, null,
+              'background:#f0f9eb;color:#67c23a;')
+          );
+        }
+      }
+      sumTr.appendChild(tdName);
+      sumTr.appendChild(tdTotal);
+      sumTr.appendChild(tdOver);
+      sumTr.appendChild(statusTd);
       tbody.appendChild(sumTr);
     }
     tbl.appendChild(tbody);
@@ -344,7 +395,7 @@
     const foot = document.createElement('div');
     foot.style.cssText = 'margin-top:8px;font-size:12px;color:#909399;';
     foot.textContent =
-      '统计范围: 全部端口数据（设备归属按业务配置 ' + CONFIG_KEY + ' 划分），点击右上角「刷新报表」更新';
+      '统计范围: 全部端口数据（设备归属按业务配置 ' + CONFIG_KEY + ' 划分）；点击状态标签可反向筛选列表，点「刷新报表」更新数据';
     wrap.appendChild(foot);
     return wrap;
   }
@@ -531,16 +582,6 @@
     return devices.some((d) => tokens.includes(d));
   }
 
-  // 找"已打开且包含目标设备"的下拉浮层（浮层 teleport 到 body）
-  function findDeviceDropdown(devices) {
-    for (const dd of document.querySelectorAll('.el-select-dropdown')) {
-      if (dd.offsetParent === null) continue; // 不可见
-      const items = [...dd.querySelectorAll('.el-select-dropdown__item')];
-      if (items.some((it) => matchDevice(it.textContent.trim(), devices))) return dd;
-    }
-    return null;
-  }
-
   function clickSearchButton() {
     for (const b of document.querySelectorAll('button')) {
       const t = b.textContent.trim();
@@ -554,21 +595,21 @@
     return false;
   }
 
-  // 同步多选下拉的选中项：选上目标设备、取消多余已选项
-  async function syncSelection(dd, devices) {
+  // 同步多选下拉的选中项：按 wantFn 选上/取消选项（wantFn: 选项文本 => 是否想要）
+  async function syncSelectionBy(dd, wantFn) {
     for (let pass = 0; pass < 3; pass++) {
       let changed = false;
       const items = [...dd.querySelectorAll('.el-select-dropdown__item')];
       for (const it of items) {
         const text = it.textContent.trim();
         const isSel = it.classList.contains('is-selected');
-        const want = matchDevice(text, devices);
+        const want = wantFn(text);
         if (want && !isSel) {
           fireClick(it);
           changed = true;
           await sleep(150);
         } else if (!want && isSel) {
-          fireClick(it); // 取消不在目标组里的已选设备
+          fireClick(it); // 取消不想要的已选项
           changed = true;
           await sleep(150);
         }
@@ -578,45 +619,70 @@
     return false;
   }
 
+  const syncSelection = (dd, devices) =>
+    syncSelectionBy(dd, (t) => matchDevice(t, devices));
+
+  // 打开某 label 对应的下拉框、按 wantFn 同步选中项、收起（整个流程）
+  async function syncDropdown(labelText, wantFn) {
+    const sel = findSelectAfter(labelText);
+    if (!sel) { log('未找到「' + labelText + '」下拉框'); return false; }
+    const wrapper = sel.querySelector('.el-select__wrapper') || sel;
+
+    document.body.click(); // 先确保关闭，再重新打开，避免 toggle 关掉
+    await sleep(250);
+    fireClick(wrapper);
+    await sleep(400);
+
+    // 找"已打开且包含目标选项"的下拉浮层（浮层 teleport 到 body）
+    let dd = null;
+    for (const d of document.querySelectorAll('.el-select-dropdown')) {
+      if (d.offsetParent === null) continue;
+      const items = [...d.querySelectorAll('.el-select-dropdown__item')];
+      if (items.some((it) => wantFn(it.textContent.trim()))) { dd = d; break; }
+    }
+    if (!dd) {
+      document.body.click();
+      log('未找到「' + labelText + '」的下拉浮层');
+      return false;
+    }
+
+    const ok = await syncSelectionBy(dd, wantFn);
+    await sleep(200);
+    document.body.click(); // 收起下拉
+    await sleep(300);
+    if (!ok) log('⚠️ 「' + labelText + '」同步后未能完全确认，请核对下拉框选中项');
+    return ok;
+  }
+
   let busy = false;
 
-  async function applyGroup(devices, name) {
+  // 一键应用筛选：devices=设备组（可空），statusLabel=状态名（可空），完成后点一次查询
+  async function applyFilters({ devices, statusLabel }) {
     if (busy) return;
     busy = true;
     try {
-      const sel = findSelectAfter('设备');
-      if (!sel) { log('未找到「设备」下拉框'); return; }
-      const wrapper =
-        sel.querySelector('.el-select__wrapper') || sel;
-      if (!wrapper) { log('未找到设备下拉框'); return; }
-
-      // 先确保下拉是关闭状态，再重新打开，避免 toggle 关掉
-      document.body.click();
-      await sleep(250);
-      fireClick(wrapper);
-      await sleep(400);
-
-      const dd = findDeviceDropdown(devices);
-      if (!dd) {
-        document.body.click();
-        log('未找到包含目标设备的下拉浮层');
-        return;
+      let ok = true;
+      if (devices) {
+        ok = (await syncDropdown('设备', (t) => matchDevice(t, devices))) && ok;
       }
-
-      const ok = await syncSelection(dd, devices);
-      await sleep(200);
-      document.body.click(); // 收起下拉
-      await sleep(300);
-
+      if (statusLabel) {
+        ok =
+          (await syncDropdown('状态', (t) => t === statusLabel)) && ok;
+      }
       if (ok) {
-        log('✅ 已将设备筛选设为 ' + name + '（' + devices.join(', ') + '）');
+        const desc =
+          (devices ? '设备=' + Object.keys(GROUPS_CURRENT).find((k) => GROUPS_CURRENT[k] === devices) + ' ' : '') +
+          (statusLabel ? '状态=' + statusLabel : '');
+        log('✅ 已应用筛选 ' + desc);
         if (AUTO_SEARCH) clickSearchButton();
-      } else {
-        log('⚠️ ' + name + ' 同步后未能完全确认，请核对下拉框选中项');
       }
     } finally {
       busy = false;
     }
+  }
+
+  async function applyGroup(devices, name) {
+    await applyFilters({ devices });
   }
 
   function makeBtn(name, devices) {
@@ -716,5 +782,5 @@
     start();
   }
 
-  log('v1.6.3 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.7 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
