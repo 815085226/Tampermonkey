@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.8.2
+// @version      1.8.3
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -849,7 +849,8 @@
     return true;
   }
 
-  // 批量进度浮层
+  // 批量进度浮层（含「终止」按钮）
+  let batchStopFlag = false;
   function batchProgress() {
     let el = document.getElementById('gavin-batch-progress');
     if (!el) {
@@ -858,10 +859,31 @@
       el.style.cssText =
         'position:fixed;top:16px;right:16px;z-index:99999;background:#303133;color:#fff;' +
         'padding:10px 16px;border-radius:6px;font-size:13px;line-height:1.5;' +
-        'box-shadow:0 4px 12px rgba(0,0,0,.25);max-width:380px;';
+        'box-shadow:0 4px 12px rgba(0,0,0,.25);max-width:380px;' +
+        'display:flex;align-items:center;gap:12px;';
+      const txt = document.createElement('span');
+      txt.id = 'gavin-batch-progress-text';
+      const stopBtn = document.createElement('button');
+      stopBtn.type = 'button';
+      stopBtn.textContent = '终止';
+      stopBtn.title = '结束批量任务（当前设备流程走完即停止）';
+      stopBtn.style.cssText =
+        'flex-shrink:0;padding:3px 12px;font-size:12px;border:none;border-radius:4px;' +
+        'background:#f56c6c;color:#fff;cursor:pointer;';
+      stopBtn.addEventListener('click', () => {
+        if (batchStopFlag) return;
+        batchStopFlag = true;
+        stopBtn.textContent = '终止中…';
+        stopBtn.disabled = true;
+        stopBtn.style.cursor = 'default';
+        log('🛑 已请求终止批量任务，当前设备流程走完后停止');
+      });
+      el.appendChild(txt);
+      el.appendChild(stopBtn);
       document.body.appendChild(el);
     }
-    return (text) => { el.textContent = text; };
+    const txt = document.getElementById('gavin-batch-progress-text');
+    return (text) => { txt.textContent = text; };
   }
   function removeBatchProgress() {
     const el = document.getElementById('gavin-batch-progress');
@@ -878,11 +900,16 @@
 
     batchRunning = true;
     busy = true; // 批量期间禁用其他快选操作
+    batchStopFlag = false;
     const prog = batchProgress();
     try {
       log('🚀 开始批量' + menuItem + '推送：L ' + groupName + '（' +
         devices.length + ' 台设备，发送总数>' + BATCH_SEND_TOTAL + '）');
       for (let i = 0; i < devices.length; i++) {
+        if (batchStopFlag) {
+          log('🛑 批量任务已终止，剩余 ' + (devices.length - i) + ' 台设备未处理');
+          break;
+        }
         const dev = devices[i];
         prog('📋 批量' + menuItem + '（' + groupName + '）' +
           (i + 1) + '/' + devices.length + ' — 设备 ' + dev + '：设置筛选…');
@@ -901,6 +928,10 @@
         // 3) 查询
         clickSearchButton();
         await sleep(2000); // 等列表刷新
+        if (batchStopFlag) {
+          log('🛑 批量任务已终止（设备 ' + dev + ' 未推送）');
+          break;
+        }
 
         // 3.5) 自动勾选查询结果（推送按钮要求先选中行）
         const selected = await selectAllQueryRows();
@@ -942,8 +973,10 @@
         log('✅ 设备 ' + dev + ' 处理完成（' + (i + 1) + '/' + devices.length + '）');
         await sleep(500);
       }
-      prog('🎉 批量' + menuItem + '（' + groupName + '）全部设备处理完毕');
-      log('🎉 批量' + menuItem + '推送流程结束');
+      prog(batchStopFlag
+        ? '🛑 批量' + menuItem + '（' + groupName + '）已终止'
+        : '🎉 批量' + menuItem + '（' + groupName + '）全部设备处理完毕');
+      log(batchStopFlag ? '🛑 批量' + menuItem + '推送流程已终止' : '🎉 批量' + menuItem + '推送流程结束');
     } finally {
       batchRunning = false;
       busy = false;
@@ -1099,5 +1132,5 @@
     start();
   }
 
-  log('v1.8.2 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.8.3 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
