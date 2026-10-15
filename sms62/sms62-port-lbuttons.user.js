@@ -1,34 +1,139 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.4.0
-// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L1~L5 按钮，一键把"设备"筛选条件设为对应设备组
+// @version      1.5.0
+// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（L1~L5，组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组
 // @author       Gavin
 // @match        http://web.sms62.com/*
 // @match        https://web.sms62.com/*
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  // ===== 配置区：各按钮对应的设备清单 =====
-  const GROUPS = {
+  // ===== 兜底配置：接口拉取失败时使用（正常情况以 LOCATION:DEVICES:CONFIG 接口值为准）=====
+  const FALLBACK_GROUPS = {
     L1: ['D1', 'D2', 'D3', 'L1D4', 'L1D5', 'L1D6', 'L1D7'],
     L2: ['D11', 'D12', 'D13'],
     L3: ['D6', 'D7', 'D14'],
     L4: ['D4', 'D5', 'D15'],
     L5: ['D8', 'D9', 'D10'],
   };
-  const AUTO_SEARCH = true; // 选完设备后自动点击"查询"，改为 false 则只设置筛选条件
+  const AUTO_SEARCH = true;   // 选完设备后自动点击"查询"，改为 false 则只设置筛选条件
   const PATH_KEYWORD = '/mkt/port';
+  const CONFIG_API = '/prod-api/manage/sysCconfig/list?pageNum=1&pageSize=200';
+  const CONFIG_KEY = 'LOCATION:DEVICES:CONFIG'; // 仅用于日志提示
 
   const BAR_ID = 'gavin-lbar';
   const log = (...a) =>
     console.log('%c[L按钮]', 'color:#409eff;font-weight:bold', ...a);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // ===== 当前生效的分组（配置加载成功后会被替换）=====
+  let GROUPS_CURRENT = { ...FALLBACK_GROUPS };
+  let configLoaded = false;
+
+  // ===== 捕获站点的 Authorization 请求头（token 存于 Admin-Token / 内存，脚本无法直接读取时靠挂钩获取）=====
+  let AUTH = null;
+  try {
+    const m = document.cookie.match(/(?:^|;\s*)Admin-Token=([^;]+)/);
+    if (m) AUTH = decodeURIComponent(m[1]);
+    if (AUTH && !/^Bearer\s/i.test(AUTH)) AUTH = 'Bearer ' + AUTH;
+  } catch (e) { /* ignore */ }
+
+  const _fetch = window.fetch;
+  window.fetch = function (input, init) {
+    try {
+      const headers = new Headers(
+        (init && init.headers) ||
+          (typeof input === 'object' && input && input.headers) ||
+          undefined
+      );
+      const a = headers.get('Authorization');
+      if (a) AUTH = a;
+    } catch (e) { /* ignore */ }
+    return _fetch.apply(this, arguments);
+  };
+  const _setReqHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+    if (String(k).toLowerCase() === 'authorization') AUTH = v;
+    return _setReqHeader.apply(this, arguments);
+  };
+
+  // ===== 从 /mkt/config 的业务配置接口拉取 LOCATION:DEVICES:CONFIG =====
+  // 在响应里深度查找形如 {"L1":"D1,D2,...","L2":...} 的配置值（不依赖具体字段名）
+  function findGroupsDeep(o, depth) {
+    if (o == null || depth > 6) return null;
+    if (typeof o === 'string') {
+      const s = o.trim();
+      if (s.startsWith('{') && /"?\bL\d+\b"?/.test(s)) {
+        try {
+          const p = JSON.parse(s);
+          if (p && typeof p === 'object' && p.L1) return p;
+        } catch (e) { /* 不是 JSON，跳过 */ }
+      }
+      return null;
+    }
+    if (Array.isArray(o)) {
+      for (const it of o) {
+        const r = findGroupsDeep(it, depth + 1);
+        if (r) return r;
+      }
+      return null;
+    }
+    if (typeof o === 'object') {
+      if (typeof o.L1 === 'string' && o.L1.length) return o; // 已是对象形式
+      for (const v of Object.values(o)) {
+        const r = findGroupsDeep(v, depth + 1);
+        if (r) return r;
+      }
+    }
+    return null;
+  }
+
+  // 组名自然排序：L2 排在 L10 前面
+  function sortGroups(g) {
+    const out = {};
+    Object.keys(g)
+      .sort((a, b) => {
+        const na = parseInt(a.replace(/\D/g, ''), 10) || 0;
+        const nb = parseInt(b.replace(/\D/g, ''), 10) || 0;
+        return na - nb || a.localeCompare(b);
+      })
+      .forEach((k) => (out[k] = String(g[k]).split(/[,，\s]+/).filter(Boolean)));
+    return out;
+  }
+
+  async function loadConfig() {
+    for (let i = 0; i < 10 && !configLoaded; i++) {
+      try {
+        if (AUTH) {
+          const res = await _fetch(CONFIG_API, {
+            headers: { Authorization: AUTH },
+            credentials: 'include',
+          });
+          const json = await res.json();
+          const found = findGroupsDeep(json, 0);
+          if (found) {
+            GROUPS_CURRENT = sortGroups(found);
+            configLoaded = true;
+            log('✅ 已从业务配置 ' + CONFIG_KEY + ' 加载设备分组:', JSON.stringify(GROUPS_CURRENT));
+            refreshBar(); // 配置到位后重建按钮（组名/数量可能变化）
+            return;
+          }
+          log('接口返回中未找到 ' + CONFIG_KEY + ' 配置值，使用内置兜底配置');
+        }
+      } catch (e) {
+        log('拉取设备分组配置失败（第 ' + (i + 1) + ' 次）:', e && e.message);
+      }
+      await sleep(3000); // 等待页面自身请求带出 token 后重试
+    }
+    if (!configLoaded) log('⚠️ 配置拉取未成功，继续使用内置兜底配置');
+  }
+
+  // ===== 页面交互辅助 =====
   function onTargetPage() {
     return (
       location.pathname.includes(PATH_KEYWORD) ||
@@ -49,10 +154,6 @@
     el.dispatchEvent(new MouseEvent('mouseup', opts));
     el.dispatchEvent(new MouseEvent('click', opts));
   }
-
-  // ===== 该站真实结构（v1.4 按用户提供的 DOM 适配）=====
-  // 筛选栏是自定义结构：平铺的 <span class="query-label">标签</span> + <div class="el-select">
-  // 每个 label 的下拉框就是它的 nextElementSibling
 
   // 找 label 文本精确匹配的 .query-label（"设备"不会误中"设备状态"）
   function findQueryLabel(labelText) {
@@ -170,34 +271,44 @@
     }
   }
 
+  function makeBtn(name, devices) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = name;
+    b.title = '设备筛选: ' + devices.join(', ');
+    b.style.cssText =
+      'padding:5px 16px;font-size:13px;border:1px solid #dcdfe6;border-radius:4px;' +
+      'background:#fff;color:#606266;cursor:pointer;transition:all .15s;';
+    b.addEventListener('mouseenter', () => {
+      b.style.color = '#409eff';
+      b.style.borderColor = '#c6e2ff';
+      b.style.background = '#ecf5ff';
+    });
+    b.addEventListener('mouseleave', () => {
+      b.style.color = '#606266';
+      b.style.borderColor = '#dcdfe6';
+      b.style.background = '#fff';
+    });
+    b.addEventListener('click', () => applyGroup(devices, name));
+    return b;
+  }
+
   function buildBar() {
     // 内联按钮条：作为 flex 容器的普通子项，紧跟在"合伙人"下拉框后面
     const bar = document.createElement('div');
     bar.id = BAR_ID;
     bar.style.cssText =
       'display:inline-flex;align-items:center;gap:6px;margin-left:12px;vertical-align:middle;';
-    for (const [name, devices] of Object.entries(GROUPS)) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = name;
-      b.title = '设备筛选: ' + devices.join(', ');
-      b.style.cssText =
-        'padding:5px 16px;font-size:13px;border:1px solid #dcdfe6;border-radius:4px;' +
-        'background:#fff;color:#606266;cursor:pointer;transition:all .15s;';
-      b.addEventListener('mouseenter', () => {
-        b.style.color = '#409eff';
-        b.style.borderColor = '#c6e2ff';
-        b.style.background = '#ecf5ff';
-      });
-      b.addEventListener('mouseleave', () => {
-        b.style.color = '#606266';
-        b.style.borderColor = '#dcdfe6';
-        b.style.background = '#fff';
-      });
-      b.addEventListener('click', () => applyGroup(devices, name));
-      bar.appendChild(b);
+    for (const [name, devices] of Object.entries(GROUPS_CURRENT)) {
+      bar.appendChild(makeBtn(name, devices));
     }
     return bar;
+  }
+
+  // 配置加载完成后重建按钮条（组名/组数变化时按钮自动更新）
+  function refreshBar() {
+    const old = document.getElementById(BAR_ID);
+    if (old) old.replaceWith(buildBar());
   }
 
   // 诊断日志（10 秒最多一次，避免刷屏）
@@ -224,7 +335,8 @@
     const partnerSelect = findSelectAfter('合伙人');
     if (partnerSelect) {
       partnerSelect.parentNode.insertBefore(buildBar(), partnerSelect.nextSibling);
-      log('✅ L1~L5 按钮已插入「合伙人」下拉框后面');
+      log('✅ 按钮已插入「合伙人」下拉框后面（' +
+        Object.keys(GROUPS_CURRENT).join('/') + '）');
       return;
     }
     diag();
@@ -232,10 +344,21 @@
 
   // SPA 路由切换 / 表格重渲染兜底轮询（站点重渲染筛选栏后自动补插）
   setInterval(tryInsert, 1500);
-  new MutationObserver(() => tryInsert()).observe(document.body, {
-    childList: true,
-    subtree: true,
-  });
 
-  log('v1.4 已加载，等待筛选栏渲染…');
+  // run-at document-start 时 body 可能还不存在，就绪后再挂观察器
+  function start() {
+    new MutationObserver(() => tryInsert()).observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+    tryInsert();
+    loadConfig(); // 异步拉取业务配置，成功后自动刷新按钮
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+
+  log('v1.5 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
