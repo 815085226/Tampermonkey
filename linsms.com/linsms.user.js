@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.5
+// @version      0.2.6
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -124,8 +124,30 @@
     }
   }
 
+  let learnedDetailTpl = null; // 自学习：从"详情"抽屉请求推断的详情接口模板，如 /api/v1/customer/campaigns/{id}
+
   function absorbJson(data, url) {
     if (!data || typeof data !== 'object') return;
+
+    // 自学习详情接口：URL 路径中出现已知 campaignId（如 /campaigns/6725），
+    // 记为详情接口模板；ban-failure-counts 这类 id 在 query 里的不会误判
+    if (url && /campaigns/.test(url) && idIndex.size) {
+      try {
+        const pathname = new URL(url, location.href).pathname;
+        for (const id of idIndex.keys()) {
+          if (pathname.includes('/' + id)) {
+            const learned = pathname.replace('/' + id, '/{id}');
+            if (learned !== learnedDetailTpl) {
+              learnedDetailTpl = learned;
+              detailTried.clear(); // 用新学到的接口重新探测所有行
+              log('学习到详情接口:', learnedDetailTpl);
+            }
+            break;
+          }
+        }
+      } catch (e) { /* ignore */ }
+    }
+
     const scan = (v, depth) => {
       if (depth > 6 || v == null || typeof v !== 'object') return;
       if (Array.isArray(v)) { v.forEach((x) => scan(x, depth + 1)); return; }
@@ -219,12 +241,16 @@
   }
 
   async function fetchDetail(id) {
-    for (const tpl of DETAIL_API_CANDIDATES) {
-      const url = location.origin + tpl.replace('{id}', id);
+    // 自学习的详情接口优先
+    const candidates = [];
+    if (learnedDetailTpl) candidates.push(learnedDetailTpl.replace('{id}', id));
+    for (const tpl of DETAIL_API_CANDIDATES) candidates.push(tpl.replace('{id}', id));
+    for (const path of candidates) {
+      const url = location.origin + path;
       const { status, data } = await gmGet(url);
       if (DEBUG) log(`详情探测 ${status}`, url);
       if (data) {
-        absorbJson(data);
+        absorbJson(data, url);
         return data;
       }
     }
