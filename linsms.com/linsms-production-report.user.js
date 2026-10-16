@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.1.0
-// @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配
+// @version      0.1.1
+// @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
 // @match        https://adm.linsms.com/*
@@ -40,6 +40,32 @@
     '/api/userProducts?pageNum=1&pageSize=2000',
     '/api/user-product/list?pageNum=1&pageSize=2000',
   ];
+
+  // 页面国家字段为 ISO2 码（实测：BR/ID/IN/MX）；通道名内是国家全名（CG-Brazil-BytePlus）。
+  // 此映射用于两侧格式不一致时桥接匹配（key/value 均为小写）
+  const ISO2_NAME = {
+    af:'afghanistan', al:'albania', dz:'algeria', ar:'argentina', am:'armenia', au:'australia',
+    at:'austria', az:'azerbaijan', bd:'bangladesh', by:'belarus', be:'belgium', bo:'bolivia',
+    ba:'bosnia and herzegovina', br:'brazil', bg:'bulgaria', kh:'cambodia', cm:'cameroon',
+    ca:'canada', cl:'chile', cn:'china', co:'colombia', cr:'costa rica', hr:'croatia',
+    cy:'cyprus', cz:'czech republic', dk:'denmark', do:'dominican republic', ec:'ecuador',
+    eg:'egypt', sv:'el salvador', ee:'estonia', et:'ethiopia', fi:'finland', fr:'france',
+    ge:'georgia', de:'germany', gh:'ghana', gr:'greece', gt:'guatemala', hn:'honduras',
+    hk:'hong kong', hu:'hungary', is:'iceland', in:'india', id:'indonesia', iq:'iraq',
+    ie:'ireland', il:'israel', it:'italy', jp:'japan', jo:'jordan', kz:'kazakhstan',
+    ke:'kenya', kw:'kuwait', kg:'kyrgyzstan', la:'laos', lv:'latvia', lb:'lebanon',
+    ly:'libya', lt:'lithuania', lu:'luxembourg', mo:'macao', my:'malaysia', mv:'maldives',
+    mt:'malta', mx:'mexico', md:'moldova', mn:'mongolia', me:'montenegro', ma:'morocco',
+    mm:'myanmar', np:'nepal', nl:'netherlands', nz:'new zealand', ni:'nicaragua',
+    ng:'nigeria', mk:'north macedonia', no:'norway', om:'oman', pk:'pakistan', pa:'panama',
+    py:'paraguay', pe:'peru', ph:'philippines', pl:'poland', pt:'portugal', qa:'qatar',
+    ro:'romania', ru:'russia', sa:'saudi arabia', rs:'serbia', sg:'singapore', sk:'slovakia',
+    si:'slovenia', za:'south africa', kr:'south korea', es:'spain', lk:'sri lanka',
+    se:'sweden', ch:'switzerland', tw:'taiwan', tj:'tajikistan', tz:'tanzania', th:'thailand',
+    tn:'tunisia', tr:'turkey', tm:'turkmenistan', ug:'uganda', ua:'ukraine', ae:'united arab emirates',
+    gb:'united kingdom', us:'united states', uy:'uruguay', uz:'uzbekistan', ve:'venezuela',
+    vn:'vietnam', ye:'yemen', zw:'zimbabwe', zm:'zambia',
+  };
   /* ======================================================= */
 
   const log = (...a) => console.log('%c[生产报表]', 'color:#e91e63;font-weight:bold', ...a);
@@ -121,6 +147,15 @@
     return true;
   }
 
+  // 国家等价判断：ISO2 码与全名桥接，其余必须全等（避免 niger/nigeria 之类包含误配）
+  function countryEq(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const an = ISO2_NAME[a] || '';
+    const bn = ISO2_NAME[b] || '';
+    return (an && an === b) || (bn && bn === a) || (an && an === bn);
+  }
+
   // 按 用户名+国家 匹配单价；找不到返回 null
   function matchPrice(user, country) {
     const u = normLow(user);
@@ -128,14 +163,17 @@
     if (!u) return null;
     let p = priceByKey.get(`${u}|${c}`);
     if (p != null) return p;
-    // 同用户名下，国家大小写/包含关系匹配
+    // 同用户名下做国家等价匹配（ISO2 码 ↔ 全名），仅一个维度可匹配时直接采用
+    let fallback = priceByUser.get(u);
+    if (fallback == null) fallback = null;
+    let matched = null;
     for (const [k, v] of priceByKey) {
       if (!k.startsWith(u + '|')) continue;
       const kc = k.slice(u.length + 1);
-      if (!kc || !c) return v; // 只有一个维度可匹配
-      if (kc === c || kc.includes(c) || c.includes(kc)) return v;
+      if (!kc || !c) { matched = v; break; } // 缓存只存了用户维度
+      if (countryEq(kc, c)) { matched = v; break; }
     }
-    return priceByUser.get(u) ?? null;
+    return matched ?? fallback;
   }
 
   /* ---------------- 报表数据嗅探 ---------------- */
@@ -244,16 +282,26 @@
     dwarn('兜底单价接口均未命中，请先访问一次 /user-products 页面让脚本缓存单价');
   }
 
+  // 全名 → ISO2 码（小写），找不到原样返回
+  function toIso2(name) {
+    const s = normLow(name);
+    if (ISO2_NAME[s]) return s;
+    for (const [code, full] of Object.entries(ISO2_NAME)) {
+      if (full === s || full.includes(s) || s.includes(full)) return code;
+    }
+    return s;
+  }
+
   /* ---------------- 字段提取 ---------------- */
   function getCountry(rec) {
     const c = norm(pick(rec, COUNTRY_KEYS));
     if (c) return c;
-    // 回退：从通道名解析，如 "CG—Brazil—BytePlus—8cb620fd" → Brazil
+    // 回退：从通道名解析，如 "CG—Brazil—BytePlus—8cb620fd" → Brazil → br
     const channel = norm(pick(rec, CHANNEL_KEYS));
     if (channel) {
       const parts = channel.split(/[—–\-_]+/).map((s) => s.trim()).filter(Boolean);
-      if (parts.length >= 2) return parts[1];
-      if (parts.length === 1) return parts[0];
+      if (parts.length >= 2) return toIso2(parts[1]);
+      if (parts.length === 1) return toIso2(parts[0]);
     }
     return '';
   }
@@ -404,7 +452,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.1.0 启动', location.href);
+    log('v0.1.1 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
