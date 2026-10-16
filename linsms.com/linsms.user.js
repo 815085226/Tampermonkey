@@ -130,11 +130,12 @@
     } catch (e) { /* ignore */ }
   }
 
-  // mkt 侧用 GM 请求拉 adm 模板文案（只 GET，只读）
+  // mkt 侧用 GM 请求拉 adm 模板文案（只 GET，只读）。拿不到不阻塞业务，仅提示
   function fetchAdmTemplates() {
     const adm = gmGetAdm();
+    if (typeof GM_xmlhttpRequest !== 'function') return;
     if (!adm.token || !adm.url) {
-      warn('缺少 adm 会话数据——请先在浏览器打开一次 adm.linsms.com/channel-templates 页面（已登录状态）');
+      log('提示: 未获取到 adm 会话数据，模板列暂只显示 id。需在浏览器打开一次 adm.linsms.com/channel-templates（已登录状态）后自动补全文案');
       return;
     }
     const url = adm.url.startsWith('http') ? adm.url : 'http://adm.linsms.com' + adm.url;
@@ -264,7 +265,7 @@
           cLine.textContent = content.length > 60 ? content.slice(0, 60) + '…' : content;
           cLine.style.cssText = 'color:#666;font-size:11px;max-width:260px;white-space:pre-wrap;word-break:break-all;';
         } else {
-          cLine.textContent = '文案未获取';
+          cLine.textContent = '文案未获取（打开 adm 模板页后自动补全）';
           cLine.style.cssText = 'color:#bbb;font-size:11px;';
         }
         td.appendChild(cLine);
