@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.1.3
+// @version      0.1.4
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -19,7 +19,7 @@
   const DEBUG = true; // 控制台打印嗅探到的接口，便于核对/调整字段
 
   // 报表记录字段候选（按顺序取第一个非空值）
-  const COUNTRY_KEYS = ['country', 'countryName', 'nation', 'countryCn', 'countryChineseName'];
+  const COUNTRY_KEYS = ['country', 'countryCode', 'countryName', 'nation', 'countryCn', 'countryChineseName'];
   const ENTERPRISE_KEYS = ['enterprise', 'enterpriseName', 'company', 'companyName', 'customer', 'customerName', 'client', 'clientName', 'customName'];
   const USER_KEYS = ['userName', 'username', 'userAccount', 'account', 'accountName', 'accountNo', 'loginName'];
   const CHANNEL_KEYS = ['supplier', 'supplierName', 'channel', 'channelName', 'channelCode', 'channelGroup', 'channelGroupName', 'supplierChannelName', 'productName', 'route', 'routeName', 'gateway', 'gatewayName'];
@@ -85,6 +85,11 @@
   // 单价映射（GM 持久化，独立于报表数据）
   let priceByKey = new Map();  // "user|country"(小写) -> price
   let priceByUser = new Map(); // user(小写) -> price
+
+  // id→名称 映射（内存态，来自 /admin/enterprises、/enterprise-users、/products 列表）
+  const entNameById = new Map();   // enterpriseId -> 企业名
+  const userNameById = new Map();  // enterpriseUserId/userId -> 用户名
+  const prodNameById = new Map();  // productId -> 产品/通道名
 
   /* ---------------- 工具函数 ---------------- */
   const norm = (v) => (v == null ? '' : String(v).trim());
@@ -194,12 +199,12 @@
   }
 
   function absorbReportRecord(rec) {
-    // 形状要求：有通道/供应商字段 + 计费条数为数字（可为 0）
-    const channel = pick(rec, CHANNEL_KEYS);
+    // 形状要求：有通道（名称或 productId）+ 计费条数为数字（可为 0）
+    const channel = norm(pick(rec, CHANNEL_KEYS)) || norm(rec.productId);
     const count = toNum(pick(rec, COUNT_KEYS));
     if (norm(channel) === '' || isNaN(count)) return false;
-    const user = pick(rec, USER_KEYS);
-    const enterprise = pick(rec, ENTERPRISE_KEYS);
+    const user = norm(pick(rec, USER_KEYS)) || norm(rec.enterpriseUserId ?? rec.userId);
+    const enterprise = norm(pick(rec, ENTERPRISE_KEYS)) || norm(rec.enterpriseId);
     if (norm(user) === '' && norm(enterprise) === '') return false;
     const sig = recordSig(rec);
     if (sig && seenSig.has(sig)) return true;
@@ -208,8 +213,35 @@
     return true;
   }
 
+  // 从基础数据列表接口吸收 id→名称 映射（enterprises / enterprise-users / products）
+  function absorbIdNameRecord(rec) {
+    let hit = false;
+    const id = norm(rec.id);
+    const entName = norm(pick(rec, ['enterpriseName']));
+    if (entName) {
+      const eid = norm(rec.enterpriseId) || id;
+      if (eid) { entNameById.set(eid, entName); hit = true; }
+    }
+    const uName = norm(pick(rec, USER_KEYS));
+    if (uName) {
+      const uid = norm(rec.enterpriseUserId) || norm(rec.userId) || id;
+      if (uid && /^\d+$/.test(uid)) { userNameById.set(uid, uName); hit = true; }
+    }
+    const pName = norm(pick(rec, ['productName']));
+    if (pName) {
+      const pid = norm(rec.productId) || id;
+      if (pid) { prodNameById.set(pid, pName); hit = true; }
+    }
+    return hit;
+  }
+
   function handleJson(url, data) {
     if (DEBUG) log('JSON:', url);
+
+    // 基础数据 id→名称 映射：任何页面都吸收
+    let idHit = 0;
+    walkRecords(data, (rec) => { if (absorbIdNameRecord(rec)) idHit++; });
+    if (idHit > 0 && DEBUG) log(`捕获名称映射 ${idHit} 条（企业 ${entNameById.size} / 用户 ${userNameById.size} / 产品 ${prodNameById.size}）`);
 
     // user-products 单价：任何页面都吸收（含兜底接口）
     let priceHit = 0;
@@ -225,7 +257,7 @@
       if (DEBUG && /reports/i.test(url)) {
         let sample = null;
         walkRecords(data, (rec) => { if (!sample) sample = rec; });
-        if (sample) log('报表样例记录:', JSON.stringify(sample).slice(0, 800));
+        if (sample) log('报表样例记录:', JSON.stringify(sample).slice(0, 2000));
         else log('报表响应无数组记录，原始头部:', JSON.stringify(data).slice(0, 600));
       }
 
@@ -311,17 +343,40 @@
   }
 
   /* ---------------- 字段提取 ---------------- */
-  function getCountry(rec) {
+  // 通道：名称字段 → productId 查产品映射 → productId 原值
+  function getChannel(rec) {
+    const c = norm(pick(rec, CHANNEL_KEYS));
+    if (c) return c;
+    const pid = norm(rec.productId);
+    if (pid) return prodNameById.get(pid) || pid;
+    return '';
+  }
+
+  function getCountry(rec, channel) {
     const c = norm(pick(rec, COUNTRY_KEYS));
     if (c) return c;
     // 回退：从通道名解析，如 "CG—Brazil—BytePlus—8cb620fd" → Brazil → br
-    const channel = norm(pick(rec, CHANNEL_KEYS));
-    if (channel) {
-      const parts = channel.split(/[—–\-_]+/).map((s) => s.trim()).filter(Boolean);
+    const ch = norm(channel ?? getChannel(rec));
+    if (ch) {
+      const parts = ch.split(/[—–\-_]+/).map((s) => s.trim()).filter(Boolean);
       if (parts.length >= 2) return toIso2(parts[1]);
       if (parts.length === 1) return toIso2(parts[0]);
     }
     return '';
+  }
+
+  // 报表记录 → 展示维度（ID 经映射翻译为名称，翻译不了保留原值）
+  function resolveRow(rec) {
+    const enterprise = norm(pick(rec, ENTERPRISE_KEYS))
+      || entNameById.get(norm(rec.enterpriseId))
+      || norm(rec.enterpriseId);
+    const user = norm(pick(rec, USER_KEYS))
+      || userNameById.get(norm(rec.enterpriseUserId ?? rec.userId))
+      || norm(rec.enterpriseUserId ?? rec.userId);
+    const channel = getChannel(rec);
+    const country = getCountry(rec, channel);
+    const count = toNum(pick(rec, COUNT_KEYS)) || 0;
+    return { country, enterprise, user, channel, count };
   }
 
   /* ---------------- 报表生成与 CSV 导出 ---------------- */
@@ -342,11 +397,12 @@
     const groups = new Map();
     let noPriceCount = 0;
     for (const rec of reportRows) {
-      const country = getCountry(rec);
-      const enterprise = norm(pick(rec, ENTERPRISE_KEYS));
-      const user = norm(pick(rec, USER_KEYS));
-      const channel = norm(pick(rec, CHANNEL_KEYS));
-      const count = toNum(pick(rec, COUNT_KEYS)) || 0;
+      const r = resolveRow(rec);
+      const country = r.country;
+      const enterprise = r.enterprise;
+      const user = r.user;
+      const channel = r.channel;
+      const count = r.count;
       // 单价优先 user-products 匹配，回退记录自带价格
       let price = matchPrice(user, country);
       if (price == null) {
@@ -470,7 +526,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.1.3 启动', location.href);
+    log('v0.1.4 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
