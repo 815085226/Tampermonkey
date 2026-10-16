@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.1
+// @version      0.2.2
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -9,6 +9,7 @@
 // @connect      mkt.linsms.com
 // @connect      adm.linsms.com
 // @run-at       document-start
+// @grant        GM_info
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -305,10 +306,9 @@
 
   /* ---------------- 4. 启动 ---------------- */
   function boot() {
-    log('v0.2.0 启动', location.href);
+    const ver = typeof GM_info !== 'undefined' ? GM_info.script.version : '?';
+    log(`v${ver} 启动`, location.href);
     loadTplCache();
-    hookXhr();
-    hookFetch();
 
     // 页面在 /campaigns 时加载模板映射（不依赖嗅探）
     if (/\/campaigns/.test(location.pathname + location.hash)) {
@@ -319,6 +319,11 @@
     mo.observe(document.documentElement, { childList: true, subtree: true });
     scheduleRender();
   }
+
+  // 关键：document-start 阶段立即安装嗅探钩子，
+  // 抢在页面首批 API 请求发出之前（DOMContentLoaded 后装会全部错过）
+  hookXhr();
+  hookFetch();
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
