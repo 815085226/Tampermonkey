@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.2.2
-// @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
+// @version      0.3.0
+// @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/供应商 汇总导出 XLSX（企业列与小计列按客户合并单元格），单价从 /user-products 匹配或按 费用÷成功条数 推导
 // @author       Gavin
 // @match        http://adm.linsms.com/*
 // @match        https://adm.linsms.com/*
@@ -10,6 +10,7 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        unsafeWindow
+// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
 // ==/UserScript==
 
 (function () {
@@ -502,51 +503,49 @@
       else noPriceRows++;
     }
 
-    // CSV（带 BOM，Excel 直接打开不乱码）；按客户小计 + 末尾合计
-    const esc = (s) => {
-      s = norm(s);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const lines = ['国家,企业,用户,通道,供应商,提交条数,成功条数,单价,金额'];
-    let curEnt = null, entCount = 0, entSuccess = 0, entAmount = 0;
-    const flushSubtotal = () => {
-      if (curEnt !== null) lines.push(`小计,${esc(curEnt)},,,,${entCount},${entSuccess},,${fmt2(entAmount)}`);
-    };
+    // XLSX 导出：企业列与小计列按客户纵向合并单元格（小计=客户金额合计）
+    if (typeof XLSX === 'undefined') { alert('XLSX 库未加载（检查 @require CDN），无法导出'); return; }
+    const cent = (n) => Math.round(n * 100) / 100;
+    const aoa = [['国家', '企业', '用户', '供应商', '提交条数', '成功条数', '单价', '金额', '小计']];
+    const merges = [];
+    let rowIdx = 1;
+    let curEnt = null, blockStart = 0, entAmount = 0;
     for (const r of rows) {
       if (r.enterprise !== curEnt) {
-        flushSubtotal();
+        if (curEnt !== null) {
+          if (rowIdx - blockStart > 1) {
+            merges.push({ s: { r: blockStart, c: 1 }, e: { r: rowIdx - 1, c: 1 } }); // 企业列合并
+            merges.push({ s: { r: blockStart, c: 8 }, e: { r: rowIdx - 1, c: 8 } }); // 小计列合并
+          }
+          aoa[blockStart][8] = cent(entAmount);
+        }
         curEnt = r.enterprise;
-        entCount = 0; entSuccess = 0; entAmount = 0;
+        blockStart = rowIdx;
+        entAmount = 0;
       }
-      const amount = r.price != null ? fmt2(r.basis * r.price) : '';
-      lines.push([esc(r.country), esc(r.enterprise), esc(r.user), esc(r.channel), esc(r.provider),
-        r.count, r.success, r.price != null ? r.price : '', amount].join(','));
-      entCount += r.count;
-      entSuccess += r.success;
-      if (r.price != null) entAmount += r.basis * r.price;
+      const amount = r.price != null ? cent(r.basis * r.price) : null;
+      aoa.push([r.country, r.enterprise, r.user, r.provider, r.count, r.success,
+        r.price != null ? r.price : '', amount, null]);
+      if (amount != null) entAmount += amount;
+      rowIdx++;
     }
-    flushSubtotal();
-    lines.push(`合计,,,,,${totalCount},${totalSuccess},,${fmt2(totalAmount)}`);
-
-    if (noPriceRows > 0) {
-      dwarn(`有 ${noPriceRows} 组未匹配到单价且费用为 0（金额留空）`);
+    if (curEnt !== null) {
+      if (rowIdx - blockStart > 1) {
+        merges.push({ s: { r: blockStart, c: 1 }, e: { r: rowIdx - 1, c: 1 } });
+        merges.push({ s: { r: blockStart, c: 8 }, e: { r: rowIdx - 1, c: 8 } });
+      }
+      aoa[blockStart][8] = cent(entAmount);
     }
+    aoa.push(['合计', '', '', '', totalCount, totalSuccess, '', cent(totalAmount), cent(totalAmount)]);
 
-    log('分组完成:', rows.length, '组，条数合计', totalCount, '，金额合计', fmt2(totalAmount));
-    const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!merges'] = merges;
+    ws['!cols'] = [{ wch: 8 }, { wch: 16 }, { wch: 22 }, { wch: 28 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 12 }];
     const d = new Date();
     const pad = (n) => String(n).padStart(2, '0');
-    const name = `生产报表_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.csv`;
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = name;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    log('触发下载:', name);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-    log(`已导出 ${name}：${rows.length} 组，计费条数合计 ${totalCount}，金额合计 ${fmt2(totalAmount)}`);
+    const name = `生产报表_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.xlsx`;
+    XLSX.writeFile(ws, name);
+    log(`已导出 ${name}：${rows.length} 组，提交合计 ${totalCount}，成功合计 ${totalSuccess}，金额合计 ${fmt2(totalAmount)}`);
     if (noPriceRows > 0) alert(`已导出，但有 ${noPriceRows} 组单价/金额留空（费用为 0 且未匹配到 user-products 单价）。`);
   }
 
@@ -632,7 +631,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.2.2 启动', location.href);
+    log('v0.3.0 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
