@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.1.7
+// @version      0.1.8
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -25,7 +25,9 @@
   const CHANNEL_KEYS = ['supplier', 'supplierName', 'channel', 'channelName', 'channelCode', 'channelGroup', 'channelGroupName', 'supplierChannelName', 'productName', 'route', 'routeName', 'gateway', 'gatewayName'];
   const COUNT_KEYS = ['billingCount', 'billedCount', 'chargeCount', 'feeCount', 'billingNum', 'billCount', 'sendMessageCount', 'sendCount', 'submitCount', 'submit', 'submitted', 'submitNum', 'totalSubmit', 'submitTotal', 'totalCount', 'messageCount', 'smsCount', 'delivered', 'deliveredCount', 'successCount', 'count', 'num', 'quantity', 'total'];
   // 成功条数（页面"成功"列）
-  const SUCCESS_KEYS = ['successCount', 'success', 'successNum', 'successTotal', 'sendSuccessCount'];
+  const SUCCESS_KEYS = ['successCount', 'success', 'successNum', 'successTotal', 'sendSuccessCount', 'succCount', 'succeedCount', 'successSubmitCount', 'submitSuccessCount', 'okCount'];
+  // 记录自带费用总额（日报"费用"列），用于推导单价：单价 = 费用 / 提交条数
+  const FEE_KEYS = ['fee', 'totalFee', 'billingFee', 'cost', 'feeAmount'];
 
   // user-products（用户产品/单价）记录字段候选
   const UP_USER_KEYS = USER_KEYS;
@@ -308,7 +310,10 @@
     if (DEBUG && isReportPage() && /(reports|enterprises|enterprise-users|products|channels)/i.test(url)) {
       let sample = null;
       walkRecords(data, (rec) => { if (!sample) sample = rec; });
-      if (sample) log('样例记录[', url.replace(location.origin, '').slice(0, 60), ']:', JSON.stringify(sample).slice(0, 800));
+      if (sample) {
+        log('样例字段[', url.replace(location.origin, '').slice(0, 50), ']:', Object.keys(sample).join(', '));
+        log('样例记录[', url.replace(location.origin, '').slice(0, 50), ']:', JSON.stringify(sample).slice(0, 3000));
+      }
     }
   }
 
@@ -437,7 +442,6 @@
 
     // 分组：国家 | 企业 | 用户 | 通道
     const groups = new Map();
-    let noPriceCount = 0;
     for (const rec of reportRows) {
       const r = resolveRow(rec);
       const country = r.country;
@@ -446,18 +450,19 @@
       const channel = r.channel;
       const count = r.count;
       const success = r.success;
-      // 单价优先 user-products 匹配，回退记录自带单价（费用总额不算）
+      const fee = toNum(pick(rec, FEE_KEYS)) || 0;
+      // 单价优先 user-products 匹配，回退记录自带单价比率字段（费用总额不算）
       let price = matchPrice(user, country);
       if (price == null) {
         const own = toNum(pick(rec, REPORT_OWN_PRICE_KEYS));
         if (!isNaN(own)) price = own;
       }
-      if (price == null) noPriceCount++;
 
       const key = `${country}\u0001${enterprise}\u0001${user}\u0001${channel}`;
-      const g = groups.get(key) || { country, enterprise, user, channel, count: 0, success: 0, price: null };
+      const g = groups.get(key) || { country, enterprise, user, channel, count: 0, success: 0, fee: 0, price: null };
       g.count += count;
       g.success += success;
+      g.fee += fee;
       if (price != null) g.price = price; // 同组单价应一致，取最后匹配值
       groups.set(key, g);
     }
@@ -467,12 +472,24 @@
       a.country.localeCompare(b.country) || a.enterprise.localeCompare(b.enterprise) ||
       a.user.localeCompare(b.user) || a.channel.localeCompare(b.channel));
 
+    // 单价缺失时用 费用/提交条数 推导（与页面费用口径一致）
+    let derivedCount = 0;
+    for (const r of rows) {
+      if (r.price == null && r.fee > 0 && r.count > 0) {
+        r.price = Math.round((r.fee / r.count) * 1e6) / 1e6;
+        derivedCount++;
+      }
+    }
+    if (derivedCount > 0) log(`单价推导: ${derivedCount} 组按 费用÷提交条数 计算`);
+
     // 汇总
     let totalCount = 0, totalSuccess = 0, totalAmount = 0;
+    let noPriceRows = 0;
     for (const r of rows) {
       totalCount += r.count;
       totalSuccess += r.success;
       if (r.price != null) totalAmount += r.count * r.price;
+      else noPriceRows++;
     }
 
     // CSV（带 BOM，Excel 直接打开不乱码）
@@ -488,8 +505,8 @@
     }
     lines.push([`合计,,,,${totalCount},${totalSuccess},,${fmt2(totalAmount)}`].join(','));
 
-    if (noPriceCount > 0) {
-      dwarn(`有 ${noPriceCount} 条记录未匹配到单价（金额留空）。请先访问 /user-products 页面，或核对用户名/国家字段`);
+    if (noPriceRows > 0) {
+      dwarn(`有 ${noPriceRows} 组未匹配到单价且费用为 0（金额留空）`);
     }
 
     log('分组完成:', rows.length, '组，条数合计', totalCount, '，金额合计', fmt2(totalAmount));
@@ -507,7 +524,7 @@
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
     log(`已导出 ${name}：${rows.length} 组，计费条数合计 ${totalCount}，金额合计 ${fmt2(totalAmount)}`);
-    if (noPriceCount > 0) alert(`已导出，但有 ${noPriceCount} 条记录未匹配到单价（金额留空）。\n请先访问 /user-products 页面后重试。`);
+    if (noPriceRows > 0) alert(`已导出，但有 ${noPriceRows} 组单价/金额留空（费用为 0 且未匹配到 user-products 单价）。`);
   }
 
   /* ---------------- 按钮：插在「查询日报」前 ---------------- */
@@ -585,7 +602,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.1.7 启动', location.href);
+    log('v0.1.8 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
