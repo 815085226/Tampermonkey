@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.2.1
+// @version      0.2.2
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -99,6 +99,7 @@
   const userNameById = new Map();     // enterpriseUserId/userId -> 用户名
   const prodNameById = new Map();     // productId -> 产品名
   const channelNameById = new Map();  // channelId -> 通道名
+  const channelProviderById = new Map(); // channelId -> 供应商名（providerName）
 
   /* ---------------- 工具函数 ---------------- */
   const norm = (v) => (v == null ? '' : String(v).trim());
@@ -252,6 +253,8 @@
       const cName = norm(pick(rec, ['channelName', 'channelGroupName'])) || name;
       const cid = norm(rec.channelId) || id;
       if (cName && cid) { channelNameById.set(cid, cName); hit = true; }
+      const provName = norm(pick(rec, ['providerName']));
+      if (provName && cid) { channelProviderById.set(cid, provName); hit = true; }
       return hit;
     }
 
@@ -421,7 +424,8 @@
     const country = getCountry(rec, channel);
     const count = toNum(pick(rec, COUNT_KEYS)) || 0; // 提交条数
     const success = toNum(pick(rec, SUCCESS_KEYS)) || 0; // 成功条数
-    return { country, enterprise, user, channel, count, success };
+    const provider = channelProviderById.get(norm(rec.channelId)) || '';
+    return { country, enterprise, user, channel, provider, count, success };
   }
 
   /* ---------------- 报表生成与 CSV 导出 ---------------- */
@@ -439,6 +443,7 @@
       const enterprise = r.enterprise;
       const user = r.user;
       const channel = r.channel;
+      const provider = r.provider;
       const count = r.count;
       const success = r.success;
       const fee = toNum(pick(rec, FEE_KEYS)) || 0;
@@ -450,7 +455,7 @@
       }
 
       const key = `${country}\u0001${enterprise}\u0001${user}\u0001${channel}`;
-      const g = groups.get(key) || { country, enterprise, user, channel, count: 0, success: 0, fee: 0, price: null };
+      const g = groups.get(key) || { country, enterprise, user, channel, provider, count: 0, success: 0, fee: 0, price: null };
       g.count += count;
       g.success += success;
       g.fee += fee;
@@ -458,9 +463,9 @@
       groups.set(key, g);
     }
 
-    // 排序：国家 → 企业 → 用户 → 通道
+    // 排序：企业（客户）优先 → 国家 → 用户 → 通道，便于按客户小计
     const rows = [...groups.values()].sort((a, b) =>
-      a.country.localeCompare(b.country) || a.enterprise.localeCompare(b.enterprise) ||
+      a.enterprise.localeCompare(b.enterprise) || a.country.localeCompare(b.country) ||
       a.user.localeCompare(b.user) || a.channel.localeCompare(b.channel));
 
     // 单价缺失时按 费用÷计费基础 推导；实测计费基础=成功条数（费用=成功×单价 精确成立），
@@ -497,18 +502,31 @@
       else noPriceRows++;
     }
 
-    // CSV（带 BOM，Excel 直接打开不乱码）
+    // CSV（带 BOM，Excel 直接打开不乱码）；按客户小计 + 末尾合计
     const esc = (s) => {
       s = norm(s);
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const lines = ['国家,企业,用户,通道,提交条数,成功条数,单价,金额'];
+    const lines = ['国家,企业,用户,通道,供应商,提交条数,成功条数,单价,金额'];
+    let curEnt = null, entCount = 0, entSuccess = 0, entAmount = 0;
+    const flushSubtotal = () => {
+      if (curEnt !== null) lines.push(`小计,${esc(curEnt)},,,,${entCount},${entSuccess},,${fmt2(entAmount)}`);
+    };
     for (const r of rows) {
+      if (r.enterprise !== curEnt) {
+        flushSubtotal();
+        curEnt = r.enterprise;
+        entCount = 0; entSuccess = 0; entAmount = 0;
+      }
       const amount = r.price != null ? fmt2(r.basis * r.price) : '';
-      lines.push([esc(r.country), esc(r.enterprise), esc(r.user), esc(r.channel),
+      lines.push([esc(r.country), esc(r.enterprise), esc(r.user), esc(r.channel), esc(r.provider),
         r.count, r.success, r.price != null ? r.price : '', amount].join(','));
+      entCount += r.count;
+      entSuccess += r.success;
+      if (r.price != null) entAmount += r.basis * r.price;
     }
-    lines.push([`合计,,,,${totalCount},${totalSuccess},,${fmt2(totalAmount)}`].join(','));
+    flushSubtotal();
+    lines.push(`合计,,,,,${totalCount},${totalSuccess},,${fmt2(totalAmount)}`);
 
     if (noPriceRows > 0) {
       dwarn(`有 ${noPriceRows} 组未匹配到单价且费用为 0（金额留空）`);
@@ -614,7 +632,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.2.1 启动', location.href);
+    log('v0.2.2 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
