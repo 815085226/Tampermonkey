@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.9
+// @version      0.2.10
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -22,8 +22,9 @@
   /* ================= 可配置区（根据实际接口调整） ================= */
   const DEBUG = true; // 控制台打印所有嗅探到的接口，便于定位真实 API
 
-  // 任务详情接口候选（{id} 会被替换）——已按 2026-10-16 实测嗅探收敛
+  // 任务详情接口候选（{id} 会被替换）——/detail 为 2026-10-16 实测真实路径
   const DETAIL_API_CANDIDATES = [
+    '/api/v1/customer/campaigns/{id}/detail',
     '/api/v1/customer/campaigns/{id}',
     '/api/v1/customer/campaigns/detail/{id}',
     '/api/v1/customer/campaign/{id}',
@@ -139,6 +140,15 @@
         tplContentMap.set(String(no), String(content));
         hit++;
       }
+      // 关联任务→模板：campaignIds 查询返回的模板项可能带 campaignId
+      const cid = item.campaignId ?? item.taskId;
+      if (cid != null && no != null) {
+        const r = recById.get(String(cid));
+        if (r && r.tplNo == null) {
+          r.tplNo = no;
+          if (DEBUG) log(`关联任务 ${cid} → 模板 ${no}`);
+        }
+      }
     }
     if (hit > 0) {
       log(`从嗅探吸收模板 ${hit} 条（累计 ${tplContentMap.size}）`);
@@ -230,6 +240,24 @@
   function hookFetch() {
     const origFetch = PAGE.fetch;
     PAGE.fetch = async function (...args) {
+      // 捕获鉴权头（fetch 场景：axios/fetch 拦截器把 token 放在请求头里）
+      try {
+        let h = args[1]?.headers;
+        if (!h && args[0] && typeof args[0] === 'object' && args[0].headers) h = args[0].headers;
+        const pick = (name) => {
+          if (!h) return;
+          if (typeof Headers !== 'undefined' && h instanceof Headers) {
+            const v = h.get(name);
+            if (v) authHeaders[name] = v;
+          } else if (Array.isArray(h)) {
+            for (const [k, v] of h) if (String(k).toLowerCase() === name) authHeaders[name] = v;
+          } else if (typeof h === 'object') {
+            for (const k in h) if (k.toLowerCase() === name) authHeaders[name] = h[k];
+          }
+        };
+        pick('authorization');
+        pick('token');
+      } catch (e) { /* ignore */ }
       const res = await origFetch.apply(PAGE, args);
       try {
         const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
@@ -260,6 +288,27 @@
 
   function saveTplCache() {
     GM_setValue(CACHE_KEY, JSON.stringify({ ts: Date.now(), map: Object.fromEntries(tplContentMap) }));
+  }
+
+  // 兜底：从 localStorage 扫描 token（XHR/fetch 都没捕获到时使用）
+  function scanLocalToken() {
+    if (authHeaders.authorization) return;
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!/token|auth/i.test(k)) continue;
+        let v = localStorage.getItem(k);
+        try {
+          const j = JSON.parse(v);
+          if (j && typeof j === 'object') v = j.token || j.access_token || j.Authorization || v;
+        } catch (e) { /* 非JSON */ }
+        if (typeof v === 'string' && v.length > 20) {
+          authHeaders.authorization = v.startsWith('Bearer') ? v : 'Bearer ' + v;
+          log('从 localStorage 捕获到令牌（键:', k + '）');
+          return;
+        }
+      }
+    } catch (e) { /* ignore */ }
   }
 
   function gmGet(url) {
@@ -460,8 +509,10 @@
     // 页面在 /campaigns 时加载模板映射（不依赖嗅探）；
     // 5s 后若仍无模板数据，带上嗅探到的查询串（countryCode 等）重试一次
     if (/\/campaigns/.test(location.pathname + location.hash)) {
+      scanLocalToken();
       buildTplMap();
       setTimeout(() => {
+        scanLocalToken();
         if (tplContentMap.size === 0) {
           log('模板映射为空，复用嗅探查询串重试');
           buildTplMap();
