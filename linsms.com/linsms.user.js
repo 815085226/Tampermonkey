@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.3.1
+// @version      0.3.2
 // @description  mkt.linsms.com/campaigns 列表在"链接"列右侧新增"模板"列，显示任务关联的模版 id
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -14,26 +14,52 @@
 
   const PAGE = unsafeWindow;
   const log = (...a) => console.log('%c[linsms]', 'color:#3f51b5;font-weight:bold', ...a);
+  const warn = (...a) => console.warn('%c[linsms]', 'color:#ff9800;font-weight:bold', ...a);
 
-  // campaignId -> selectedChannelTemplateId（从列表接口嗅探）
+  const CACHE_KEY = 'linsms_campaign_tpl_map_v1';
+
+  // campaignId -> 模板id
   const tplByCampaign = new Map();
-  let lastListUrl = null;   // 最近一次嗅探到的列表请求 URL（兜底重拉用）
-  let refetched = false;    // 兜底重拉只做一次
+  const authHeaders = {};      // 从页面请求学到的鉴权头（重拉用）
+  let lastListUrl = null;      // 最近嗅探到的列表请求 URL
+  let badge = null;
 
-  /* ---------- 1. 嗅探：记录 campaignId -> 模板id ---------- */
+  /* ---------- 0. 缓存：学到的映射永久保留 ---------- */
+  function loadCache() {
+    try {
+      const raw = PAGE.localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        for (const [k, v] of Object.entries(JSON.parse(raw))) tplByCampaign.set(k, v);
+      }
+    } catch (e) { /* ignore */ }
+  }
+  function saveCache() {
+    try {
+      PAGE.localStorage.setItem(CACHE_KEY, JSON.stringify(Object.fromEntries(tplByCampaign)));
+    } catch (e) { /* ignore */ }
+  }
+
+  /* ---------- 1. 嗅探列表接口：records[].campaignId -> selectedChannelTemplateId ---------- */
   function absorb(data, url) {
     if (!data || typeof data !== 'object') return;
-    if (url && url.includes('/customer/campaigns?')) lastListUrl = url;
+    if (!url || !url.includes('/customer/campaigns?')) return;
+    lastListUrl = url;
 
-    const records = Array.isArray(data.records) ? data.records : (Array.isArray(data) ? data : null);
-    if (!records) return;
+    const records = Array.isArray(data.records) ? data.records : null;
+    if (!records) {
+      warn('列表响应无 records 数组:', JSON.stringify(data).slice(0, 200));
+      return;
+    }
+    let n = 0;
     for (const rec of records) {
       if (rec && rec.campaignId != null && rec.selectedChannelTemplateId != null) {
         tplByCampaign.set(String(rec.campaignId), String(rec.selectedChannelTemplateId));
+        n++;
       }
     }
-    if (tplByCampaign.size) {
-      log(`任务→模板映射 ${tplByCampaign.size} 条，刷新列`);
+    log(`列表嗅探: ${records.length} 条任务, ${n} 条带模板id (映射累计 ${tplByCampaign.size})`);
+    if (n) {
+      saveCache();
       renderAll();
     }
   }
@@ -42,28 +68,45 @@
     const X = PAGE.XMLHttpRequest;
     if (X.prototype.__linsmsHooked) return;
     X.prototype.__linsmsHooked = true;
+
     const origOpen = X.prototype.open;
-    X.prototype.open = function (method, url, ...rest) {
+    X.prototype.open = function (m, url, ...r) {
       this.__url = url;
-      return origOpen.call(this, method, url, ...rest);
+      return origOpen.call(this, m, url, ...r);
+    };
+    const origHdr = X.prototype.setRequestHeader;
+    X.prototype.setRequestHeader = function (k, v) {
+      try { if (/^authorization$/i.test(k) && v) authHeaders.authorization = v; } catch (e) {}
+      return origHdr.call(this, k, v);
     };
     const origSend = X.prototype.send;
-    X.prototype.send = function (...args) {
+    X.prototype.send = function (...a) {
       this.addEventListener('load', function () {
         try {
           const url = String(this.__url || '');
           if (!url.includes('/api/')) return;
-          const data = JSON.parse(this.responseText);
+          const data = this.responseType === 'json' ? this.response : JSON.parse(this.responseText);
           absorb(data, url);
         } catch (e) { /* 非 JSON 忽略 */ }
       });
-      return origSend.apply(this, args);
+      return origSend.apply(this, a);
     };
   }
 
   function hookFetch() {
     const origFetch = PAGE.fetch;
     PAGE.fetch = async function (...args) {
+      try {
+        const h = args[1]?.headers;
+        if (h) {
+          let auth = null;
+          if (h instanceof Headers) auth = h.get('authorization');
+          else if (Array.isArray(h)) auth = h.find(([k]) => String(k).toLowerCase() === 'authorization')?.[1];
+          else auth = h.authorization || h.Authorization;
+          if (auth) authHeaders.authorization = auth;
+        }
+      } catch (e) { /* ignore */ }
+
       const res = await origFetch.apply(PAGE, args);
       try {
         const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
@@ -75,14 +118,23 @@
     };
   }
 
-  /* ---------- 2. 兜底：4s 后仍无数据，用页面 XHR 重拉一次列表 ---------- */
+  /* ---------- 2. 兜底：页面还有 "-" 行时，带鉴权重拉一次列表 ---------- */
+  function hasUnresolvedRow() {
+    return !!document.querySelector('td[data-linsms-col]');
+  }
   function refetchList() {
-    if (refetched || tplByCampaign.size || !lastListUrl) return;
-    refetched = true;
-    log('未嗅探到模板id，重拉列表:', lastListUrl);
+    if (!lastListUrl) { warn('重拉跳过: 没有嗅探到列表URL'); return; }
+    log('主动重拉列表:', lastListUrl, 'auth=', Object.keys(authHeaders));
     const x = new PAGE.XMLHttpRequest();
     x.open('GET', lastListUrl);
-    x.onload = () => { try { absorb(JSON.parse(x.responseText), lastListUrl); } catch (e) {} };
+    for (const [k, v] of Object.entries(authHeaders)) {
+      try { x.setRequestHeader(k, v); } catch (e) {}
+    }
+    x.onload = () => {
+      try { absorb(JSON.parse(x.responseText), lastListUrl); }
+      catch (e) { warn('重拉解析失败:', e && e.message); }
+    };
+    x.onerror = () => warn('重拉请求失败');
     x.send();
   }
 
@@ -96,7 +148,7 @@
     return -1;
   }
 
-  // 行 -> campaignId：行文本里出现过的数字段（如 6725）在映射里即命中
+  // 行 -> campaignId：行文本里的数字段在映射中即命中
   function findCampaignId(row) {
     const nums = (row.textContent || '').match(/(?<!\d)(\d{2,12})(?!\d)/g) || [];
     for (const n of nums) {
@@ -111,7 +163,6 @@
       const colIdx = findLinkColIndex(table);
       if (colIdx < 0) continue;
 
-      // 表头加"模板"列（只加一次）
       const headRow = table.querySelector('thead tr');
       if (headRow && !headRow.querySelector('th[data-linsms-col]')) {
         const th = document.createElement('th');
@@ -120,7 +171,6 @@
         headRow.children[colIdx].after(th);
       }
 
-      // 每行插入/更新单元格（每次渲染都刷新内容，映射后到也能回填）
       for (const row of table.querySelectorAll('tbody tr')) {
         const cell = row.cells?.[colIdx];
         if (!cell) continue;
@@ -130,7 +180,6 @@
           td.dataset.linsmsCol = '1';
           cell.after(td);
         }
-
         const cid = findCampaignId(row);
         const tplId = cid ? tplByCampaign.get(cid) : null;
         td.textContent = tplId || '-';
@@ -139,10 +188,24 @@
           : 'color:#999;';
       }
     }
+    updateBadge();
   }
 
-  /* ---------- 4. 启动 ---------- */
-  log('v0.3.0 启动', location.href);
+  /* ---------- 4. 状态标：肉眼看映射状态，不用翻控制台 ---------- */
+  function updateBadge() {
+    if (!badge || !badge.isConnected) {
+      badge = document.createElement('div');
+      badge.style.cssText =
+        'position:fixed;left:8px;bottom:8px;z-index:99999;background:#3f51b5;color:#fff;' +
+        'font:600 11px/1.6 monospace;padding:2px 8px;border-radius:4px;pointer-events:none;opacity:.85;';
+      (document.body || document.documentElement).appendChild(badge);
+    }
+    badge.textContent = `linsms 映射:${tplByCampaign.size}条`;
+  }
+
+  /* ---------- 5. 启动 ---------- */
+  log('v0.3.2 启动', location.href);
+  loadCache();
   hookXhr();
   hookFetch();
 
@@ -151,12 +214,15 @@
     clearTimeout(timer);
     timer = setTimeout(renderAll, 200);
   });
-  const watch = () => mo.observe(PAGE.document.documentElement || PAGE.document, { childList: true, subtree: true });
+  const watch = () =>
+    mo.observe(PAGE.document.documentElement || PAGE.document, { childList: true, subtree: true });
   if (PAGE.document.documentElement) watch();
   else PAGE.document.addEventListener('readystatechange', watch, { once: true });
 
   PAGE.document.addEventListener('DOMContentLoaded', () => {
     renderAll();
-    setTimeout(refetchList, 4000); // 兜底重拉
+    // 4s 后仍有 "-" 行就带鉴权重拉；再不够 10s 补一次
+    setTimeout(() => { if (hasUnresolvedRow()) refetchList(); }, 4000);
+    setTimeout(() => { if (hasUnresolvedRow()) refetchList(); }, 10000);
   });
 })();
