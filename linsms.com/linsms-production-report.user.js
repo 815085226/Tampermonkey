@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.1.6
+// @version      0.1.7
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -235,7 +235,7 @@
       return hit;
     }
     if (/enterprises/i.test(url)) {
-      const eName = norm(pick(rec, ['enterpriseName'])) || name;
+      const eName = norm(pick(rec, ['enterpriseName', 'enterprise', 'companyName', 'company', 'fullName', 'nickName'])) || name;
       const eid = norm(rec.enterpriseId) || id;
       if (eName && eid) { entNameById.set(eid, eName); hit = true; }
       return hit;
@@ -288,16 +288,9 @@
       savePriceCache();
     }
 
-    // 监控报表数据：仅报表页吸收
-    if (isReportPage()) {
-      // 诊断：reports 接口打印第一条样例记录（或响应头部），用于核对真实字段名
-      if (DEBUG && /reports/i.test(url)) {
-        let sample = null;
-        walkRecords(data, (rec) => { if (!sample) sample = rec; });
-        if (sample) log('报表样例记录:', JSON.stringify(sample).slice(0, 2000));
-        else log('报表响应无数组记录，原始头部:', JSON.stringify(data).slice(0, 600));
-      }
-
+    // 监控报表数据：仅报表页 + user-daily 接口（表格数据源）。
+    // country-daily 是顶部汇总卡数据，吸收会导致重复计算，跳过
+    if (isReportPage() && /user-daily/i.test(url)) {
       let hit = 0;
       walkRecords(data, (rec) => { if (absorbReportRecord(rec)) hit++; });
       // 兜底：接口返回单个聚合对象（非数组）时直接尝试吸收
@@ -309,6 +302,13 @@
         showBtn = true;
         scheduleSync();
       }
+    }
+
+    // 诊断：reports / 基础数据列表接口打印第一条样例记录，用于核对真实字段名
+    if (DEBUG && isReportPage() && /(reports|enterprises|enterprise-users|products|channels)/i.test(url)) {
+      let sample = null;
+      walkRecords(data, (rec) => { if (!sample) sample = rec; });
+      if (sample) log('样例记录[', url.replace(location.origin, '').slice(0, 60), ']:', JSON.stringify(sample).slice(0, 800));
     }
   }
 
@@ -445,6 +445,7 @@
       const user = r.user;
       const channel = r.channel;
       const count = r.count;
+      const success = r.success;
       // 单价优先 user-products 匹配，回退记录自带单价（费用总额不算）
       let price = matchPrice(user, country);
       if (price == null) {
@@ -584,7 +585,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.1.6 启动', location.href);
+    log('v0.1.7 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
