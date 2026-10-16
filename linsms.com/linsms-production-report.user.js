@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.3.0
+// @version      0.3.1
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/供应商 汇总导出 XLSX（企业列与小计列按客户合并单元格），单价从 /user-products 匹配或按 费用÷成功条数 推导
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -541,10 +541,12 @@
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws['!merges'] = merges;
     ws['!cols'] = [{ wch: 8 }, { wch: 16 }, { wch: 22 }, { wch: 28 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 12 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '生产报表');
     const d = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     const name = `生产报表_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.xlsx`;
-    XLSX.writeFile(ws, name);
+    XLSX.writeFile(wb, name);
     log(`已导出 ${name}：${rows.length} 组，提交合计 ${totalCount}，成功合计 ${totalSuccess}，金额合计 ${fmt2(totalAmount)}`);
     if (noPriceRows > 0) alert(`已导出，但有 ${noPriceRows} 组单价/金额留空（费用为 0 且未匹配到 user-products 单价）。`);
   }
@@ -631,7 +633,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.3.0 启动', location.href);
+    log('v0.3.1 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
