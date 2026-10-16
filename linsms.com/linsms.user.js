@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.6
+// @version      0.2.7
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -48,10 +48,12 @@
   const log = (...a) => console.log('%c[linsms]', 'color:#3f51b5;font-weight:bold', ...a);
   const dwarn = (...a) => DEBUG && console.warn('%c[linsms]', 'color:#ff9800;font-weight:bold', ...a);
 
-  const campaignMap = new Map();   // taskName -> { id, tplNo, ...raw }
+  const campaignMap = new Map();   // taskName -> record（长数字名别名）
+  const recById = new Map();       // String(campaignId) -> record（主索引）
   const idIndex = new Map();       // String(campaignId) -> taskName
   const detailTried = new Set();   // 已探测过详情的任务 id
   const tplContentMap = new Map(); // tplNo -> content
+  const authHeaders = {};          // 从页面 XHR 捕获的鉴权头（authorization/token）
   let lastTplQuery = '';           // 最近一次嗅探到的 channel-templates 查询串（含 countryCode）
   const rowDone = new WeakSet();   // 已注入的行
 
@@ -73,16 +75,28 @@
 
   function tryAbsorbRecord(rec) {
     if (!rec || typeof rec !== 'object') return false;
-    // 任务名特征：较长的纯数字串（如 202610161339）
-    const name =
-      deepFind(rec, ['taskName', 'campaignName', 'name', 'taskNo', 'campaignNo']) ?? null;
-    if (typeof name !== 'string' || !/^\d{10,}$/.test(name)) return false;
-    const id = deepFind(rec, ['id', 'campaignId', 'taskId']);
+    // 形状门槛：campaignId/taskId 显式存在；或 id+name+type 且不含文案字段
+    //（防止把模板记录 id=6105 之类误收为任务）
+    const hasCampaignId = 'campaignId' in rec || 'taskId' in rec;
+    const looksCampaign =
+      typeof rec.type === 'string' &&
+      typeof rec.name === 'string' &&
+      TPL_CONTENT_KEYS.every((k) => !(k in rec));
+    if (!hasCampaignId && !looksCampaign) return false;
+    const id = hasCampaignId ? deepFind(rec, ['campaignId', 'taskId']) : rec.id;
+    if (id == null) return false;
+    const name = deepFind(rec, ['taskName', 'campaignName', 'name', 'taskNo', 'campaignNo']) ?? null;
     const tplNo = deepFind(rec, TPL_NO_KEYS);
-    const prev = campaignMap.get(name) || {};
-    campaignMap.set(name, { ...prev, ...rec, id: id ?? prev.id, tplNo: tplNo ?? prev.tplNo });
-    if (id != null) idIndex.set(String(id), name);
-    if (DEBUG) log('捕获任务记录:', name, 'tplNo=', tplNo ?? '(无)', rec);
+    // 以任务 id 为主键归档（Quick 随机名任务也能存），长数字任务名额外建别名
+    const key = String(id);
+    const prev = recById.get(key) || {};
+    const merged = { ...prev, ...rec, id: id ?? prev.id, tplNo: tplNo ?? prev.tplNo };
+    recById.set(key, merged);
+    if (typeof name === 'string' && /^\d{10,}$/.test(name)) {
+      campaignMap.set(name, merged);
+      idIndex.set(key, name);
+    }
+    if (DEBUG) log('捕获任务记录:', key, 'tplNo=', merged.tplNo ?? '(无)', rec);
     return true;
   }
 
@@ -124,25 +138,29 @@
     }
   }
 
-  let learnedDetailTpl = null; // 自学习：从"详情"抽屉请求推断的详情接口模板，如 /api/v1/customer/campaigns/{id}
+  let learnedDetailTpl = null; // 自学习：从"详情"抽屉请求推断的详情接口模板，如 /api/v1/customer/campaigns/{id}/detail
 
   function absorbJson(data, url) {
     if (!data || typeof data !== 'object') return;
 
-    // 自学习详情接口：URL 路径中出现已知 campaignId（如 /campaigns/6725），
-    // 记为详情接口模板；ban-failure-counts 这类 id 在 query 里的不会误判
-    if (url && /campaigns/.test(url) && idIndex.size) {
+    // 自学习详情接口：路径形如 .../campaigns/<数字> 或 .../campaigns/<数字>/detail
+    // （ban-failure-counts 的 id 在 query 里，不会命中此正则）
+    if (url && /\/campaigns\//.test(url)) {
       try {
         const pathname = new URL(url, location.href).pathname;
-        for (const id of idIndex.keys()) {
-          if (pathname.includes('/' + id)) {
-            const learned = pathname.replace('/' + id, '/{id}');
-            if (learned !== learnedDetailTpl) {
+        const m = pathname.match(/^(.*\/campaigns\/)(\d+)(\/[a-z-]*)?$/);
+        if (m) {
+          const learned = m[1] + '{id}' + (m[3] || '');
+          if (learned !== learnedDetailTpl) {
+            // /detail 结尾的优先于无后缀（probe-smsplist 之类不含模板信息）
+            const better =
+              !learnedDetailTpl ||
+              (learned.endsWith('/detail') && !learnedDetailTpl.endsWith('/detail'));
+            if (better) {
               learnedDetailTpl = learned;
-              detailTried.clear(); // 用新学到的接口重新探测所有行
+              detailTried.clear(); // 换用新接口后重新探测所有行
               log('学习到详情接口:', learnedDetailTpl);
             }
-            break;
           }
         }
       } catch (e) { /* ignore */ }
@@ -171,6 +189,15 @@
       return origOpen.call(this, method, url, ...rest);
     };
     const origSend = XHR.prototype.send;
+    // 捕获鉴权头（接口探测返回 401 的原因：令牌在 Authorization 头里而非 Cookie）
+    const origSH = XHR.prototype.setRequestHeader;
+    XHR.prototype.setRequestHeader = function (k, v) {
+      try {
+        const lk = String(k).toLowerCase();
+        if (lk === 'authorization' || lk.includes('token')) authHeaders[lk] = v;
+      } catch (e) { /* ignore */ }
+      return origSH.call(this, k, v);
+    };
     XHR.prototype.send = function (...args) {
       this.addEventListener('load', function () {
         const url = this.__linsmsUrl || '';
@@ -228,6 +255,7 @@
       GM_xmlhttpRequest({
         method: 'GET',
         url,
+        headers: Object.keys(authHeaders).length ? authHeaders : undefined,
         timeout: 10000,
         onload: (r) => {
           let data = null;
@@ -325,44 +353,41 @@
     return -1;
   }
 
-  function getTaskNameFromRow(row) {
-    const text = row.textContent || '';
+  function findRecForRow(row) {
     // 1) 行内 10+ 位纯数字 = 任务名本身
-    const m = text.match(/\b(\d{10,})\b/);
-    if (m && campaignMap.has(m[1])) return m[1];
-    // 2) 任务单元格里的短数字（如 6725）= 任务 ID，反查嗅探记录
+    const m = (row.textContent || '').match(/\b(\d{10,})\b/);
+    if (m && campaignMap.has(m[1])) return campaignMap.get(m[1]);
+    // 2) 任务单元格里的短数字（如 6725）= 任务 ID，查主索引
     const taskCell = row.cells?.[1];
     if (taskCell) {
       const nums = taskCell.textContent.match(/(?<![/:\d.])(\d{2,8})(?![/:\d.])/g) || [];
       for (const n of nums) {
-        const name = idIndex.get(n);
-        if (name) return name;
+        const r = recById.get(n);
+        if (r) return r;
       }
     }
-    return m ? m[1] : null;
+    return m ? campaignMap.get(m[1]) : null;
   }
 
   async function renderRow(table, row, colIdx) {
     if (rowDone.has(row)) return;
     const cell = row.cells?.[colIdx];
     if (!cell) return;
-    const taskName = getTaskNameFromRow(row);
-    if (!taskName) return;
+    const rec = findRecForRow(row);
+    if (!rec) return;
 
-    let rec = campaignMap.get(taskName);
-    let tplNo = rec?.tplNo;
+    let tplNo = rec.tplNo;
 
     // 列表接口没带模板编号 → 探测详情接口（每个 id 只探一次，防刷屏）
-    if (tplNo == null && rec?.id != null && !detailTried.has(String(rec.id))) {
+    if (tplNo == null && rec.id != null && !detailTried.has(String(rec.id))) {
       detailTried.add(String(rec.id));
       await fetchDetail(rec.id);
-      rec = campaignMap.get(taskName);
-      tplNo = rec?.tplNo;
+      tplNo = recById.get(String(rec.id))?.tplNo;
     }
     if (tplNo == null) return; // 拿不到编号就不注入
 
     // 详情若直接带了文案字段，优先用（省一次模板映射查询）
-    const directContent = rec ? deepFind(rec, TPL_CONTENT_KEYS) : null;
+    const directContent = deepFind(rec, TPL_CONTENT_KEYS);
     const content = directContent != null ? String(directContent) : tplContentMap.get(String(tplNo));
 
     rowDone.add(row);
