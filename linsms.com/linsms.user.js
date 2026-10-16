@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.12
+// @version      0.2.13
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -120,8 +120,27 @@
       campaignMap.set(name, merged);
       idIndex.set(key, name);
     }
+    // 拿到过模板编号的任务持久化（后端响应结构不稳定，好数据要留住）
+    if (merged.tplNo != null) saveCampaignCache();
     if (DEBUG) log('捕获任务记录:', key, 'tplNo=', merged.tplNo ?? '(无)', rec);
     return true;
+  }
+
+  const CAMP_CACHE_KEY = 'linsms_campaign_cache_v1';
+  function saveCampaignCache() {
+    try {
+      GM_setValue(CAMP_CACHE_KEY, JSON.stringify({ ts: Date.now(), recs: [...recById.values()] }));
+    } catch (e) { /* ignore */ }
+  }
+
+  function loadCampaignCache() {
+    try {
+      const c = JSON.parse(GM_getValue(CAMP_CACHE_KEY, '{}'));
+      if (c.ts && Date.now() - c.ts < 6 * 3600e3 && Array.isArray(c.recs)) {
+        for (const r of c.recs) tryAbsorbRecord(r);
+        log('已加载任务缓存', recById.size, '条');
+      }
+    } catch (e) { /* ignore */ }
   }
 
   function absorbTemplates(data, url) {
@@ -304,25 +323,27 @@
     GM_setValue(CACHE_KEY, JSON.stringify({ ts: Date.now(), map: Object.fromEntries(tplContentMap) }));
   }
 
-  // 兜底：从 localStorage 扫描 token（XHR/fetch 都没捕获到时使用）
+  // 兜底：从 localStorage / sessionStorage 扫描 token（XHR/fetch 都没捕获到时使用）
   function scanLocalToken() {
     if (authHeaders.authorization) return;
-    try {
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (!/token|auth/i.test(k)) continue;
-        let v = localStorage.getItem(k);
-        try {
-          const j = JSON.parse(v);
-          if (j && typeof j === 'object') v = j.token || j.access_token || j.Authorization || v;
-        } catch (e) { /* 非JSON */ }
-        if (typeof v === 'string' && v.length > 20) {
-          authHeaders.authorization = v.startsWith('Bearer') ? v : 'Bearer ' + v;
-          log('从 localStorage 捕获到令牌（键:', k + '）');
-          return;
+    for (const store of [localStorage, sessionStorage]) {
+      try {
+        for (let i = 0; i < store.length; i++) {
+          const k = store.key(i);
+          if (!/token|auth/i.test(k)) continue;
+          let v = store.getItem(k);
+          try {
+            const j = JSON.parse(v);
+            if (j && typeof j === 'object') v = j.token || j.access_token || j.Authorization || v;
+          } catch (e) { /* 非JSON */ }
+          if (typeof v === 'string' && v.length > 20) {
+            authHeaders.authorization = v.startsWith('Bearer') ? v : 'Bearer ' + v;
+            log('从 Web Storage 捕获到令牌（键:', k + '）');
+            return;
+          }
         }
-      }
-    } catch (e) { /* ignore */ }
+      } catch (e) { /* ignore */ }
+    }
   }
 
   function gmGet(url) {
@@ -351,7 +372,7 @@
     for (const path of candidates) {
       const url = location.origin + path;
       const { status, data } = await gmGet(url);
-      if (DEBUG) log(`详情探测 ${status}`, url);
+      if (DEBUG) log(`详情探测 ${status} auth=[${Object.keys(authHeaders).join('|') || '无'}]`, url);
       if (data) {
         // 打印详情响应结构，确认模板编号的真实字段名
         if (DEBUG) log(`详情响应 ${id}:`, JSON.stringify(data).slice(0, 1000));
@@ -371,7 +392,7 @@
       const base = host || location.origin;
       const url = base + path;
       const { status, data } = await gmGet(url);
-      if (DEBUG) log(`模板探测 ${status}`, url);
+      if (DEBUG) log(`模板探测 ${status} auth=[${Object.keys(authHeaders).join('|') || '无'}]`, url);
       if (!data) continue;
       // 展开为数组
       let arr = [];
@@ -534,6 +555,7 @@
     log(`v${ver} 启动`, location.href);
     addVersionBadge(ver);
     loadTplCache();
+    loadCampaignCache();
 
     // 页面在 /campaigns 时加载模板映射（不依赖嗅探）；
     // 5s 后若仍无模板数据，带上嗅探到的查询串（countryCode 等）重试一次
