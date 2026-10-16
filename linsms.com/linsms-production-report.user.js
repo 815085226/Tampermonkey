@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.1.2
+// @version      0.1.3
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -22,8 +22,8 @@
   const COUNTRY_KEYS = ['country', 'countryName', 'nation', 'countryCn', 'countryChineseName'];
   const ENTERPRISE_KEYS = ['enterprise', 'enterpriseName', 'company', 'companyName', 'customer', 'customerName', 'client', 'clientName', 'customName'];
   const USER_KEYS = ['userName', 'username', 'userAccount', 'account', 'accountName', 'accountNo', 'loginName'];
-  const CHANNEL_KEYS = ['supplier', 'supplierName', 'channel', 'channelName', 'channelCode', 'productName', 'route', 'routeName', 'gateway', 'gatewayName'];
-  const COUNT_KEYS = ['billingCount', 'billedCount', 'chargeCount', 'feeCount', 'billingNum', 'billCount', 'sendMessageCount', 'sendCount', 'submitCount', 'count', 'num', 'quantity', 'total'];
+  const CHANNEL_KEYS = ['supplier', 'supplierName', 'channel', 'channelName', 'channelCode', 'channelGroup', 'channelGroupName', 'supplierChannelName', 'productName', 'route', 'routeName', 'gateway', 'gatewayName'];
+  const COUNT_KEYS = ['billingCount', 'billedCount', 'chargeCount', 'feeCount', 'billingNum', 'billCount', 'sendMessageCount', 'sendCount', 'submitCount', 'submit', 'submitted', 'submitNum', 'totalSubmit', 'submitTotal', 'totalCount', 'messageCount', 'smsCount', 'delivered', 'deliveredCount', 'successCount', 'count', 'num', 'quantity', 'total'];
 
   // user-products（用户产品/单价）记录字段候选
   const UP_USER_KEYS = USER_KEYS;
@@ -221,8 +221,20 @@
 
     // 监控报表数据：仅报表页吸收
     if (isReportPage()) {
+      // 诊断：reports 接口打印第一条样例记录（或响应头部），用于核对真实字段名
+      if (DEBUG && /reports/i.test(url)) {
+        let sample = null;
+        walkRecords(data, (rec) => { if (!sample) sample = rec; });
+        if (sample) log('报表样例记录:', JSON.stringify(sample).slice(0, 800));
+        else log('报表响应无数组记录，原始头部:', JSON.stringify(data).slice(0, 600));
+      }
+
       let hit = 0;
       walkRecords(data, (rec) => { if (absorbReportRecord(rec)) hit++; });
+      // 兜底：接口返回单个聚合对象（非数组）时直接尝试吸收
+      if (hit === 0 && data && typeof data === 'object' && !Array.isArray(data)) {
+        if (absorbReportRecord(data)) hit++;
+      }
       if (hit > 0) {
         log(`捕获报表记录 ${hit} 条（累计 ${reportRows.length}） ← ${url}`);
         showBtn = true;
@@ -458,7 +470,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.1.2 启动', location.href);
+    log('v0.1.3 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
