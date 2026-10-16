@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.1.8
+// @version      0.1.9
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -24,8 +24,8 @@
   const USER_KEYS = ['userName', 'username', 'userAccount', 'account', 'accountName', 'accountNo', 'loginName'];
   const CHANNEL_KEYS = ['supplier', 'supplierName', 'channel', 'channelName', 'channelCode', 'channelGroup', 'channelGroupName', 'supplierChannelName', 'productName', 'route', 'routeName', 'gateway', 'gatewayName'];
   const COUNT_KEYS = ['billingCount', 'billedCount', 'chargeCount', 'feeCount', 'billingNum', 'billCount', 'sendMessageCount', 'sendCount', 'submitCount', 'submit', 'submitted', 'submitNum', 'totalSubmit', 'submitTotal', 'totalCount', 'messageCount', 'smsCount', 'delivered', 'deliveredCount', 'successCount', 'count', 'num', 'quantity', 'total'];
-  // 成功条数（页面"成功"列）
-  const SUCCESS_KEYS = ['successCount', 'success', 'successNum', 'successTotal', 'sendSuccessCount', 'succCount', 'succeedCount', 'successSubmitCount', 'submitSuccessCount', 'okCount'];
+  // 成功条数（页面"成功"列）——实测计费口径=成功条数（费用=成功×单价 精确成立）
+  const SUCCESS_KEYS = ['successCount', 'success', 'successNum', 'successTotal', 'sendSuccessCount', 'succCount', 'succeedCount', 'successSubmitCount', 'submitSuccessCount', 'okCount', 'sucCount', 'succNum', 'successCnt', 'successMsgCount', 'validCount', 'sendedSuccess'];
   // 记录自带费用总额（日报"费用"列），用于推导单价：单价 = 费用 / 提交条数
   const FEE_KEYS = ['fee', 'totalFee', 'billingFee', 'cost', 'feeAmount'];
 
@@ -472,23 +472,25 @@
       a.country.localeCompare(b.country) || a.enterprise.localeCompare(b.enterprise) ||
       a.user.localeCompare(b.user) || a.channel.localeCompare(b.channel));
 
-    // 单价缺失时用 费用/提交条数 推导（与页面费用口径一致）
+    // 单价缺失时按 费用÷计费基础 推导；实测计费基础=成功条数（费用=成功×单价 精确成立），
+    // 成功条数缺失时退回 提交条数
     let derivedCount = 0;
     for (const r of rows) {
-      if (r.price == null && r.fee > 0 && r.count > 0) {
-        r.price = Math.round((r.fee / r.count) * 1e6) / 1e6;
+      r.basis = r.success > 0 ? r.success : r.count;
+      if (r.price == null && r.fee > 0 && r.basis > 0) {
+        r.price = Math.round((r.fee / r.basis) * 1e6) / 1e6;
         derivedCount++;
       }
     }
-    if (derivedCount > 0) log(`单价推导: ${derivedCount} 组按 费用÷提交条数 计算`);
+    if (derivedCount > 0) log(`单价推导: ${derivedCount} 组按 费用÷成功条数 计算`);
 
-    // 汇总
+    // 汇总（金额 = 计费基础 × 单价，即 成功条数 × 单价）
     let totalCount = 0, totalSuccess = 0, totalAmount = 0;
     let noPriceRows = 0;
     for (const r of rows) {
       totalCount += r.count;
       totalSuccess += r.success;
-      if (r.price != null) totalAmount += r.count * r.price;
+      if (r.price != null) totalAmount += r.basis * r.price;
       else noPriceRows++;
     }
 
@@ -499,7 +501,7 @@
     };
     const lines = ['国家,企业,用户,通道,提交条数,成功条数,单价,金额'];
     for (const r of rows) {
-      const amount = r.price != null ? fmt2(r.count * r.price) : '';
+      const amount = r.price != null ? fmt2(r.basis * r.price) : '';
       lines.push([esc(r.country), esc(r.enterprise), esc(r.user), esc(r.channel),
         r.count, r.success, r.price != null ? r.price : '', amount].join(','));
     }
@@ -602,7 +604,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.1.8 启动', location.href);
+    log('v0.1.9 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
