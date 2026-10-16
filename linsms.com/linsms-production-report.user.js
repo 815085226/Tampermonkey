@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.1.1
+// @version      0.1.2
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -9,6 +9,7 @@
 // @run-at       document-start
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
@@ -70,6 +71,10 @@
 
   const log = (...a) => console.log('%c[生产报表]', 'color:#e91e63;font-weight:bold', ...a);
   const dwarn = (...a) => DEBUG && console.warn('%c[生产报表]', 'color:#ff9800;font-weight:bold', ...a);
+
+  // 页面真实全局对象：grant 模式下沙箱内的 XMLHttpRequest/fetch 是副本，
+  // 直接 patch 拦不到页面发出的请求，必须钩 unsafeWindow
+  const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* ---------------- 状态（内存态：刷新即重置） ---------------- */
   let reportRows = [];        // 监控报表页嗅探到的原始记录
@@ -227,13 +232,14 @@
   }
 
   function hookXhr() {
-    const origOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    const XHR = PAGE.XMLHttpRequest;
+    const origOpen = XHR.prototype.open;
+    XHR.prototype.open = function (method, url, ...rest) {
       this.__linsmsUrl = url;
       return origOpen.call(this, method, url, ...rest);
     };
     const origSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.send = function (...args) {
+    XHR.prototype.send = function (...args) {
       this.addEventListener('load', function () {
         const url = this.__linsmsUrl || '';
         const ct = this.getResponseHeader?.('content-type') || '';
@@ -245,9 +251,9 @@
   }
 
   function hookFetch() {
-    const origFetch = window.fetch;
-    window.fetch = async function (...args) {
-      const res = await origFetch.apply(this, args);
+    const origFetch = PAGE.fetch;
+    PAGE.fetch = async function (...args) {
+      const res = await origFetch.apply(PAGE, args);
       try {
         const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
         const ct = res.headers?.get?.('content-type') || '';
@@ -452,7 +458,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.1.1 启动', location.href);
+    log('v0.1.2 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
