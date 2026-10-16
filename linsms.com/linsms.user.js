@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.13
+// @version      0.2.14
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -346,7 +346,34 @@
     }
   }
 
+  // 同源探测：用页面自己的 XHR 发请求——Origin/Referer/Cookie 与页面正常请求完全一致，
+  // 避开油猴后台请求因来源校验被 401 的问题
+  function pageXhrGet(url) {
+    return new Promise((resolve) => {
+      try {
+        const x = new PAGE.XMLHttpRequest();
+        x.open('GET', url, true);
+        for (const [k, v] of Object.entries(authHeaders)) {
+          try { x.setRequestHeader(k, v); } catch (e) { /* ignore */ }
+        }
+        x.timeout = 10000;
+        x.onload = () => {
+          let data = null;
+          try { data = JSON.parse(x.responseText); } catch (e) { /* 非 JSON */ }
+          resolve({ status: x.status, data });
+        };
+        x.onerror = () => resolve({ status: 0, data: null });
+        x.ontimeout = () => resolve({ status: -1, data: null });
+        x.send();
+      } catch (e) {
+        resolve({ status: 0, data: null });
+      }
+    });
+  }
+
   function gmGet(url) {
+    // 同源走页面 XHR，跨域才走 GM 后台
+    if (url.startsWith(location.origin + '/')) return pageXhrGet(url);
     return new Promise((resolve) => {
       GM_xmlhttpRequest({
         method: 'GET',
