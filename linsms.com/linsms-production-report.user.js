@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.1.9
+// @version      0.2.0
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -25,9 +25,9 @@
   const CHANNEL_KEYS = ['supplier', 'supplierName', 'channel', 'channelName', 'channelCode', 'channelGroup', 'channelGroupName', 'supplierChannelName', 'productName', 'route', 'routeName', 'gateway', 'gatewayName'];
   const COUNT_KEYS = ['billingCount', 'billedCount', 'chargeCount', 'feeCount', 'billingNum', 'billCount', 'sendMessageCount', 'sendCount', 'submitCount', 'submit', 'submitted', 'submitNum', 'totalSubmit', 'submitTotal', 'totalCount', 'messageCount', 'smsCount', 'delivered', 'deliveredCount', 'successCount', 'count', 'num', 'quantity', 'total'];
   // 成功条数（页面"成功"列）——实测计费口径=成功条数（费用=成功×单价 精确成立）
-  const SUCCESS_KEYS = ['successCount', 'success', 'successNum', 'successTotal', 'sendSuccessCount', 'succCount', 'succeedCount', 'successSubmitCount', 'submitSuccessCount', 'okCount', 'sucCount', 'succNum', 'successCnt', 'successMsgCount', 'validCount', 'sendedSuccess'];
-  // 记录自带费用总额（日报"费用"列），用于推导单价：单价 = 费用 / 提交条数
-  const FEE_KEYS = ['fee', 'totalFee', 'billingFee', 'cost', 'feeAmount'];
+  const SUCCESS_KEYS = ['submitSuccess', 'successCount', 'success', 'successNum', 'successTotal', 'sendSuccessCount', 'succCount', 'succeedCount', 'successSubmitCount', 'submitSuccessCount', 'okCount', 'sucCount', 'succNum', 'successCnt', 'successMsgCount', 'validCount', 'sendedSuccess'];
+  // 记录自带费用总额（日报"费用"列 estimatedFee），用于推导单价：单价 = 费用 / 成功条数
+  const FEE_KEYS = ['estimatedFee', 'fee', 'totalFee', 'billingFee', 'cost', 'feeAmount'];
 
   // user-products（用户产品/单价）记录字段候选
   const UP_USER_KEYS = USER_KEYS;
@@ -604,7 +604,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.1.9 启动', location.href);
+    log('v0.2.0 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
