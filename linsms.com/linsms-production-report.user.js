@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.3.2
+// @version      0.3.3
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/供应商 汇总导出 XLSX（企业列与小计列按客户合并单元格），单价从 /user-products 匹配或按 费用÷成功条数 推导
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -400,8 +400,10 @@
     return { country, enterprise, user, channel, provider, count, success };
   }
 
-  /* ---------------- 报表生成与 CSV 导出 ---------------- */
-  function fmt2(n) { return (Math.round(n * 100) / 100).toFixed(2); }
+  /* ---------------- 报表生成与 XLSX 导出 ---------------- */
+  // 保留 6 位小数：仅用于消除浮点运算噪声（如 0.1+0.2），系统数据本身 ≤6 位小数，值不受影响
+  const t6 = (n) => Math.round(n * 1e6) / 1e6;
+  function fmt6(n) { return t6(n).toFixed(6); }
 
   async function generateReport() {
     log('生成流程开始，内存记录', reportRows.length, '条');
@@ -414,7 +416,6 @@
       const country = r.country;
       const enterprise = r.enterprise;
       const user = r.user;
-      const channel = r.channel;
       const provider = r.provider;
       const count = r.count;
       const success = r.success;
@@ -426,8 +427,9 @@
         if (!isNaN(own)) price = own;
       }
 
-      const key = `${country}\u0001${enterprise}\u0001${user}\u0001${channel}`;
-      const g = groups.get(key) || { country, enterprise, user, channel, provider, count: 0, success: 0, fee: 0, price: null };
+      // 分组：用户+供应商——相同用户、相同供应商的数据求和后只展示一条
+      const key = `${user}\u0001${provider}`;
+      const g = groups.get(key) || { country, enterprise, user, provider, count: 0, success: 0, fee: 0, price: null };
       g.count += count;
       g.success += success;
       g.fee += fee;
@@ -435,10 +437,10 @@
       groups.set(key, g);
     }
 
-    // 排序：企业（客户）优先 → 国家 → 用户 → 通道，便于按客户小计
+    // 排序：企业（客户）优先 → 用户 → 供应商，便于按客户小计
     const rows = [...groups.values()].sort((a, b) =>
-      a.enterprise.localeCompare(b.enterprise) || a.country.localeCompare(b.country) ||
-      a.user.localeCompare(b.user) || a.channel.localeCompare(b.channel));
+      a.enterprise.localeCompare(b.enterprise) || a.user.localeCompare(b.user) ||
+      a.provider.localeCompare(b.provider));
 
     // 单价缺失时按 费用÷计费基础 推导；实测计费基础=成功条数（费用=成功×单价 精确成立），
     // 成功条数缺失时退回 提交条数
@@ -446,7 +448,7 @@
     for (const r of rows) {
       r.basis = r.success > 0 ? r.success : r.count;
       if (r.price == null && r.fee > 0 && r.basis > 0) {
-        r.price = Math.round((r.fee / r.basis) * 1e6) / 1e6;
+        r.price = t6(r.fee / r.basis);
         derivedCount++;
       }
     }
@@ -454,19 +456,19 @@
 
     // 仍无单价的组（费用为 0 且无缓存单价）金额留空，导出后在提示中说明
 
-    // 汇总（金额 = 计费基础 × 单价，即 成功条数 × 单价）
+    // 汇总（金额优先直接取系统费用 estimatedFee；无费用时才按 计费基础 × 单价 计算）
     let totalCount = 0, totalSuccess = 0, totalAmount = 0;
     let noPriceRows = 0;
     for (const r of rows) {
       totalCount += r.count;
       totalSuccess += r.success;
-      if (r.price != null) totalAmount += r.basis * r.price;
+      if (r.fee > 0) totalAmount += r.fee;
+      else if (r.price != null) totalAmount += r.basis * r.price;
       else noPriceRows++;
     }
 
     // XLSX 导出：企业列与小计列按客户纵向合并单元格（小计=客户金额合计）
     if (typeof XLSX === 'undefined') { alert('XLSX 库未加载（检查 @require CDN），无法导出'); return; }
-    const cent = (n) => Math.round(n * 100) / 100;
     const aoa = [['国家', '企业', '用户', '供应商', '提交条数', '成功条数', '单价', '金额', '小计']];
     const merges = [];
     let rowIdx = 1;
@@ -478,13 +480,14 @@
             merges.push({ s: { r: blockStart, c: 1 }, e: { r: rowIdx - 1, c: 1 } }); // 企业列合并
             merges.push({ s: { r: blockStart, c: 8 }, e: { r: rowIdx - 1, c: 8 } }); // 小计列合并
           }
-          aoa[blockStart][8] = cent(entAmount);
+          aoa[blockStart][8] = t6(entAmount);
         }
         curEnt = r.enterprise;
         blockStart = rowIdx;
         entAmount = 0;
       }
-      const amount = r.price != null ? cent(r.basis * r.price) : null;
+      // 金额严格按系统数据：有费用直接用 estimatedFee，无费用才按 成功条数×单价 计算
+      const amount = r.fee > 0 ? t6(r.fee) : (r.price != null ? t6(r.basis * r.price) : null);
       aoa.push([r.country, r.enterprise, r.user, r.provider, r.count, r.success,
         r.price != null ? r.price : '', amount, null]);
       if (amount != null) entAmount += amount;
@@ -495,11 +498,19 @@
         merges.push({ s: { r: blockStart, c: 1 }, e: { r: rowIdx - 1, c: 1 } });
         merges.push({ s: { r: blockStart, c: 8 }, e: { r: rowIdx - 1, c: 8 } });
       }
-      aoa[blockStart][8] = cent(entAmount);
+      aoa[blockStart][8] = t6(entAmount);
     }
-    aoa.push(['合计', '', '', '', totalCount, totalSuccess, '', cent(totalAmount), cent(totalAmount)]);
+    aoa.push(['合计', '', '', '', totalCount, totalSuccess, '', t6(totalAmount), t6(totalAmount)]);
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
+    // 单价/金额/小计三列统一 6 位小数显示格式
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    for (let R = 1; R <= range.e.r; R++) {
+      for (let C = 6; C <= 8; C++) {
+        const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })];
+        if (cell && cell.t === 'n') cell.z = '0.000000';
+      }
+    }
     ws['!merges'] = merges;
     ws['!cols'] = [{ wch: 8 }, { wch: 16 }, { wch: 22 }, { wch: 28 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 12 }];
     const wb = XLSX.utils.book_new();
@@ -508,7 +519,7 @@
     const pad = (n) => String(n).padStart(2, '0');
     const name = `生产报表_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.xlsx`;
     XLSX.writeFile(wb, name);
-    log(`已导出 ${name}：${rows.length} 组，提交合计 ${totalCount}，成功合计 ${totalSuccess}，金额合计 ${fmt2(totalAmount)}`);
+    log(`已导出 ${name}：${rows.length} 组，提交合计 ${totalCount}，成功合计 ${totalSuccess}，金额合计 ${fmt6(totalAmount)}`);
     if (noPriceRows > 0) alert(`已导出，但有 ${noPriceRows} 组单价/金额留空（费用为 0 且未匹配到 user-products 单价）。`);
   }
 
@@ -593,7 +604,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.3.2 启动', location.href);
+    log('v0.3.3 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
