@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.1.5
+// @version      0.1.6
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -24,6 +24,8 @@
   const USER_KEYS = ['userName', 'username', 'userAccount', 'account', 'accountName', 'accountNo', 'loginName'];
   const CHANNEL_KEYS = ['supplier', 'supplierName', 'channel', 'channelName', 'channelCode', 'channelGroup', 'channelGroupName', 'supplierChannelName', 'productName', 'route', 'routeName', 'gateway', 'gatewayName'];
   const COUNT_KEYS = ['billingCount', 'billedCount', 'chargeCount', 'feeCount', 'billingNum', 'billCount', 'sendMessageCount', 'sendCount', 'submitCount', 'submit', 'submitted', 'submitNum', 'totalSubmit', 'submitTotal', 'totalCount', 'messageCount', 'smsCount', 'delivered', 'deliveredCount', 'successCount', 'count', 'num', 'quantity', 'total'];
+  // 成功条数（页面"成功"列）
+  const SUCCESS_KEYS = ['successCount', 'success', 'successNum', 'successTotal', 'sendSuccessCount'];
 
   // user-products（用户产品/单价）记录字段候选
   const UP_USER_KEYS = USER_KEYS;
@@ -90,10 +92,11 @@
   let priceByKey = new Map();  // "user|country"(小写) -> price
   let priceByUser = new Map(); // user(小写) -> price
 
-  // id→名称 映射（内存态，来自 /admin/enterprises、/enterprise-users、/products 列表）
-  const entNameById = new Map();   // enterpriseId -> 企业名
-  const userNameById = new Map();  // enterpriseUserId/userId -> 用户名
-  const prodNameById = new Map();  // productId -> 产品/通道名
+  // id→名称 映射（内存态，来自 /admin/enterprises、/enterprise-users、/products、/channels 列表）
+  const entNameById = new Map();      // enterpriseId -> 企业名
+  const userNameById = new Map();     // enterpriseUserId/userId -> 用户名
+  const prodNameById = new Map();     // productId -> 产品名
+  const channelNameById = new Map();  // channelId -> 通道名
 
   /* ---------------- 工具函数 ---------------- */
   const norm = (v) => (v == null ? '' : String(v).trim());
@@ -217,10 +220,40 @@
     return true;
   }
 
-  // 从基础数据列表接口吸收 id→名称 映射（enterprises / enterprise-users / products）
-  function absorbIdNameRecord(rec) {
+  // 从基础数据列表接口吸收 id→名称 映射。
+  // 列表记录多用通用 name 字段，按接口 URL 定向归入对应映射，避免张冠李戴
+  function absorbIdNameRecord(rec, url) {
+    url = url || '';
     let hit = false;
     const id = norm(rec.id);
+    const name = norm(pick(rec, ['name']));
+
+    if (/enterprise-users/i.test(url)) {
+      const uName = norm(pick(rec, USER_KEYS)) || name;
+      const uid = norm(rec.enterpriseUserId) || norm(rec.userId) || id;
+      if (uName && uid && /^\d+$/.test(uid)) { userNameById.set(uid, uName); hit = true; }
+      return hit;
+    }
+    if (/enterprises/i.test(url)) {
+      const eName = norm(pick(rec, ['enterpriseName'])) || name;
+      const eid = norm(rec.enterpriseId) || id;
+      if (eName && eid) { entNameById.set(eid, eName); hit = true; }
+      return hit;
+    }
+    if (/product/i.test(url)) {
+      const pName = norm(pick(rec, ['productName'])) || name;
+      const pid = norm(rec.productId) || id;
+      if (pName && pid) { prodNameById.set(pid, pName); hit = true; }
+      return hit;
+    }
+    if (/channel/i.test(url)) {
+      const cName = norm(pick(rec, ['channelName', 'channelGroupName'])) || name;
+      const cid = norm(rec.channelId) || id;
+      if (cName && cid) { channelNameById.set(cid, cName); hit = true; }
+      return hit;
+    }
+
+    // 非 URL 命中时按显式名称字段兜底
     const entName = norm(pick(rec, ['enterpriseName']));
     if (entName) {
       const eid = norm(rec.enterpriseId) || id;
@@ -244,7 +277,7 @@
 
     // 基础数据 id→名称 映射：任何页面都吸收
     let idHit = 0;
-    walkRecords(data, (rec) => { if (absorbIdNameRecord(rec)) idHit++; });
+    walkRecords(data, (rec) => { if (absorbIdNameRecord(rec, url)) idHit++; });
     if (idHit > 0 && DEBUG) log(`捕获名称映射 ${idHit} 条（企业 ${entNameById.size} / 用户 ${userNameById.size} / 产品 ${prodNameById.size}）`);
 
     // user-products 单价：任何页面都吸收（含兜底接口）
@@ -347,10 +380,12 @@
   }
 
   /* ---------------- 字段提取 ---------------- */
-  // 通道：名称字段 → productId 查产品映射 → productId 原值
+  // 通道：名称字段 → channelId 查通道映射 → productId 查产品映射 → productId 原值
   function getChannel(rec) {
     const c = norm(pick(rec, CHANNEL_KEYS));
     if (c) return c;
+    const cid = norm(rec.channelId);
+    if (cid && channelNameById.has(cid)) return channelNameById.get(cid);
     const pid = norm(rec.productId);
     if (pid) return prodNameById.get(pid) || pid;
     return '';
@@ -379,8 +414,9 @@
       || norm(rec.enterpriseUserId ?? rec.userId);
     const channel = getChannel(rec);
     const country = getCountry(rec, channel);
-    const count = toNum(pick(rec, COUNT_KEYS)) || 0;
-    return { country, enterprise, user, channel, count };
+    const count = toNum(pick(rec, COUNT_KEYS)) || 0; // 提交条数
+    const success = toNum(pick(rec, SUCCESS_KEYS)) || 0; // 成功条数
+    return { country, enterprise, user, channel, count, success };
   }
 
   /* ---------------- 报表生成与 CSV 导出 ---------------- */
@@ -418,8 +454,9 @@
       if (price == null) noPriceCount++;
 
       const key = `${country}\u0001${enterprise}\u0001${user}\u0001${channel}`;
-      const g = groups.get(key) || { country, enterprise, user, channel, count: 0, price: null };
+      const g = groups.get(key) || { country, enterprise, user, channel, count: 0, success: 0, price: null };
       g.count += count;
+      g.success += success;
       if (price != null) g.price = price; // 同组单价应一致，取最后匹配值
       groups.set(key, g);
     }
@@ -430,9 +467,10 @@
       a.user.localeCompare(b.user) || a.channel.localeCompare(b.channel));
 
     // 汇总
-    let totalCount = 0, totalAmount = 0;
+    let totalCount = 0, totalSuccess = 0, totalAmount = 0;
     for (const r of rows) {
       totalCount += r.count;
+      totalSuccess += r.success;
       if (r.price != null) totalAmount += r.count * r.price;
     }
 
@@ -441,13 +479,13 @@
       s = norm(s);
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const lines = ['国家,企业,用户,通道,计费条数,单价,金额'];
+    const lines = ['国家,企业,用户,通道,提交条数,成功条数,单价,金额'];
     for (const r of rows) {
       const amount = r.price != null ? fmt2(r.count * r.price) : '';
       lines.push([esc(r.country), esc(r.enterprise), esc(r.user), esc(r.channel),
-        r.count, r.price != null ? r.price : '', amount].join(','));
+        r.count, r.success, r.price != null ? r.price : '', amount].join(','));
     }
-    lines.push([`合计,,,,${totalCount},,${fmt2(totalAmount)}`].join(','));
+    lines.push([`合计,,,,${totalCount},${totalSuccess},,${fmt2(totalAmount)}`].join(','));
 
     if (noPriceCount > 0) {
       dwarn(`有 ${noPriceCount} 条记录未匹配到单价（金额留空）。请先访问 /user-products 页面，或核对用户名/国家字段`);
@@ -546,7 +584,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.1.5 启动', location.href);
+    log('v0.1.6 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
