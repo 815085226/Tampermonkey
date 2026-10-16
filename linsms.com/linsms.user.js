@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.0
+// @version      0.2.1
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -107,11 +107,12 @@
       this.addEventListener('load', function () {
         const url = this.__linsmsUrl || '';
         if (!/linsms\.com/.test(location.host) && !url.includes('linsms.com')) return;
+        // 静态资源噪音过滤
+        if (/\.(js|css|png|jpe?g|gif|svg|woff2?|ttf|ico|map)(\?|$)/i.test(url)) return;
         const ct = this.getResponseHeader?.('content-type') || '';
-        if (!ct.includes('json')) return;
+        if (DEBUG) log(`XHR ${this.status} [${ct.split(';')[0] || '-'}]`, url);
         try {
           const data = JSON.parse(this.responseText);
-          if (DEBUG) log('XHR:', url);
           absorbJson(data);
         } catch (e) { /* 非 JSON 忽略 */ }
       });
@@ -125,14 +126,15 @@
       const res = await origFetch.apply(this, args);
       try {
         const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+        if (/\.(js|css|png|jpe?g|gif|svg|woff2?|ttf|ico|map)(\?|$)/i.test(url)) return res;
         const ct = res.headers?.get?.('content-type') || '';
-        if (ct.includes('json')) {
-          const clone = res.clone();
-          clone.json().then((data) => {
-            if (DEBUG) log('FETCH:', url);
-            absorbJson(data);
-          }).catch(() => {});
-        }
+        if (DEBUG) log(`FETCH ${res.status} [${ct.split(';')[0] || '-'}]`, url);
+        const clone = res.clone();
+        clone.text().then((t) => {
+          try {
+            absorbJson(JSON.parse(t));
+          } catch (e) { /* 非 JSON 忽略 */ }
+        }).catch(() => {});
       } catch (e) { /* ignore */ }
       return res;
     };
@@ -160,10 +162,12 @@
         url,
         timeout: 10000,
         onload: (r) => {
-          try { resolve(JSON.parse(r.responseText)); } catch (e) { resolve(null); }
+          let data = null;
+          try { data = JSON.parse(r.responseText); } catch (e) { /* 非 JSON */ }
+          resolve({ status: r.status, data });
         },
-        onerror: () => resolve(null),
-        ontimeout: () => resolve(null),
+        onerror: () => resolve({ status: 0, data: null }),
+        ontimeout: () => resolve({ status: -1, data: null }),
       });
     });
   }
@@ -171,9 +175,9 @@
   async function fetchDetail(id) {
     for (const tpl of DETAIL_API_CANDIDATES) {
       const url = location.origin + tpl.replace('{id}', id);
-      const data = await gmGet(url);
+      const { status, data } = await gmGet(url);
+      if (DEBUG) log(`详情探测 ${status}`, url);
       if (data) {
-        dwarn('详情接口命中:', url);
         absorbJson(data);
         return data;
       }
@@ -183,7 +187,9 @@
 
   async function buildTplMap() {
     for (const { host, path } of TEMPLATE_API_CANDIDATES) {
-      const data = await gmGet(host + path);
+      const url = host + path;
+      const { status, data } = await gmGet(url);
+      if (DEBUG) log(`模板探测 ${status}`, url);
       if (!data) continue;
       // 展开为数组
       let arr = [];
