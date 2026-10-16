@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.14
+// @version      0.2.15
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -194,9 +194,14 @@
   }
 
   let learnedDetailTpl = null; // 自学习：从"详情"抽屉请求推断的详情接口模板，如 /api/v1/customer/campaigns/{id}/detail
+  let lastListUrl = null;      // 最近嗅探到的任务列表 URL（缺字段时自动重拉）
+  let listRefetchTried = false;
 
   function absorbJson(data, url) {
     if (!data || typeof data !== 'object') return;
+
+    // 记录列表接口 URL，供"响应缺模板编号字段时重拉"兜底
+    if (url && /\/campaigns\?/.test(url)) lastListUrl = url;
 
     // 自学习详情接口：路径形如 .../campaigns/<数字> 或 .../campaigns/<数字>/detail
     // （ban-failure-counts 的 id 在 query 里，不会命中此正则）
@@ -596,6 +601,19 @@
           buildTplMap();
         }
       }, 5000);
+
+      // 后端响应结构不稳定：若 4s 后所有任务都没有模板编号，
+      // 用页面 XHR 重拉一次列表（多实例下好响应概率很高）
+      setTimeout(() => {
+        const recs = [...recById.values()];
+        if (!listRefetchTried && recs.length > 0 && recs.every((r) => r.tplNo == null) && lastListUrl) {
+          listRefetchTried = true;
+          log('列表响应缺模板编号字段，自动重拉一次列表');
+          gmGet(lastListUrl).then(({ data }) => {
+            if (data) absorbJson(data, lastListUrl);
+          });
+        }
+      }, 4000);
     }
 
     const mo = new MutationObserver(() => scheduleRender());
