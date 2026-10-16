@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.8
+// @version      0.2.9
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -37,8 +37,8 @@
     { host: 'http://adm.linsms.com', path: '/api/v1/customer/channel-templates' },
   ];
 
-  // 模板编号字段候选 / 模板内容字段候选
-  const TPL_NO_KEYS = ['templateNumber', 'templateNo', 'templateId', 'templateCode', 'channelTemplateId', 'tplId'];
+  // 模板编号字段候选（selectedChannelTemplateId 为 2026-10-16 实测真实字段）
+  const TPL_NO_KEYS = ['selectedChannelTemplateId', 'templateNumber', 'templateNo', 'templateId', 'templateCode', 'channelTemplateId', 'tplId'];
   const TPL_CONTENT_KEYS = ['content', 'templateContent', 'text', 'copyWriting', 'body', 'message'];
 
   const CACHE_KEY = 'linsms_tpl_map_v1';
