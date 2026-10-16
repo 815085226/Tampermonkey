@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.11
+// @version      0.2.12
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -86,6 +86,8 @@
     return no;
   }
 
+  const tplShapeLogged = new Set(); // 已打印过字段签名的记录形状（防刷屏）
+
   function tryAbsorbRecord(rec) {
     if (!rec || typeof rec !== 'object') return false;
     // 形状门槛：campaignId/taskId 显式存在；或 id+name+type 且不含文案字段
@@ -101,6 +103,14 @@
     const name = deepFind(rec, ['taskName', 'campaignName', 'name', 'taskNo', 'campaignNo']) ?? null;
     // 实测真实字段优先：selectedChannelTemplateId（列表响应即携带，如 "6118"）
     const tplNo = rec.selectedChannelTemplateId ?? extractTplNo(rec);
+    // 诊断：任务记录却拿不到模板编号时，打印一次它的全部字段名
+    if (tplNo == null && DEBUG) {
+      const sig = Object.keys(rec).sort().join(',');
+      if (!tplShapeLogged.has(sig)) {
+        tplShapeLogged.add(sig);
+        dwarn(`任务 ${id} 无模板编号字段，记录字段: [${sig}]`);
+      }
+    }
     // 以任务 id 为主键归档（Quick 随机名任务也能存），长数字任务名额外建别名
     const key = String(id);
     const prev = recById.get(key) || {};
@@ -505,10 +515,24 @@
     updatePendingContent();
   }
 
+  // 页面角落版本徽章：肉眼确认页面里实际运行的版本，排除旧代码残留
+  function addVersionBadge(ver) {
+    try {
+      const el = document.createElement('div');
+      el.textContent = `linsms v${ver}`;
+      el.title = 'linsms 油猴脚本运行中';
+      el.style.cssText =
+        'position:fixed;left:8px;bottom:8px;z-index:2147483647;background:rgba(63,81,181,.85);' +
+        'color:#fff;font-size:11px;line-height:1;padding:4px 10px;border-radius:10px;pointer-events:none;';
+      (document.body || document.documentElement).appendChild(el);
+    } catch (e) { /* ignore */ }
+  }
+
   /* ---------------- 4. 启动 ---------------- */
   function boot() {
     const ver = typeof GM_info !== 'undefined' ? GM_info.script.version : '?';
     log(`v${ver} 启动`, location.href);
+    addVersionBadge(ver);
     loadTplCache();
 
     // 页面在 /campaigns 时加载模板映射（不依赖嗅探）；
