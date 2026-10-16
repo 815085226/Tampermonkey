@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.3.1
+// @version      0.3.2
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/供应商 汇总导出 XLSX（企业列与小计列按客户合并单元格），单价从 /user-products 匹配或按 费用÷成功条数 推导
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -42,15 +42,6 @@
   const PRICE_CACHE_KEY = 'linsms_userprice_map_v1';
   const PRICE_CACHE_TTL = 24 * 3600 * 1000; // 24h
 
-  // 兜底：生成报表时若价格缺失，尝试主动拉取 user-products 列表接口
-  const USER_PRODUCTS_API_CANDIDATES = [
-    '/api/v1/admin/user-products?pageNum=1&pageSize=2000',
-    '/api/user-products?pageNum=1&pageSize=2000',
-    '/api/user/products?pageNum=1&pageSize=2000',
-    '/api/userProducts?pageNum=1&pageSize=2000',
-    '/api/user-product/list?pageNum=1&pageSize=2000',
-  ];
-
   // 页面国家字段为 ISO2 码（实测：BR/ID/IN/MX）；通道名内是国家全名（CG-Brazil-BytePlus）。
   // 此映射用于两侧格式不一致时桥接匹配（key/value 均为小写）
   const ISO2_NAME = {
@@ -89,7 +80,6 @@
   let reportRows = [];        // 监控报表页嗅探到的原始记录
   const seenSig = new Set();  // 记录去重
   let showBtn = false;        // 数据加载完成后才显示按钮
-  let fetchTried = false;     // 兜底接口本次会话是否已尝试
 
   // 单价映射（GM 持久化，独立于报表数据）
   let priceByKey = new Map();  // "user|country"(小写) -> price
@@ -356,27 +346,8 @@
   }
 
   /* ---------------- 兜底：主动拉取 user-products ---------------- */
-  async function tryFetchUserProducts() {
-    if (fetchTried) return;
-    fetchTried = true;
-    for (const path of USER_PRODUCTS_API_CANDIDATES) {
-      try {
-        const res = await fetch(location.origin + path, { credentials: 'include' });
-        if (!res.ok) continue;
-        const ct = res.headers.get('content-type') || '';
-        if (!ct.includes('json')) continue;
-        const data = await res.json();
-        const before = priceByKey.size;
-        walkRecords(data, (rec) => absorbPriceRecord(rec));
-        if (priceByKey.size > before) {
-          log(`兜底单价接口命中: ${path}（缓存共 ${priceByKey.size}）`);
-          savePriceCache();
-          return;
-        }
-      } catch (e) { /* 下一个候选 */ }
-    }
-    dwarn('兜底单价接口均未命中，请先访问一次 /user-products 页面让脚本缓存单价');
-  }
+  // 已移除：该站不存在 user-products 接口（5 个候选全 404），
+  // 主动探测白白拖慢导出；单价现在由 费用÷成功条数 推导覆盖
 
   // 全名 → ISO2 码（小写），找不到原样返回
   function toIso2(name) {
@@ -481,17 +452,7 @@
     }
     if (derivedCount > 0) log(`单价推导: ${derivedCount} 组按 费用÷成功条数 计算`);
 
-    // 仍有组既无费用又无单价 → 才兜底探测 user-products 接口（避免每次点击都慢速探测）
-    if (rows.some((r) => r.price == null && r.fee <= 0)) {
-      log('存在无费用且无单价的组，尝试兜底拉取 user-products');
-      await tryFetchUserProducts();
-      for (const r of rows) {
-        if (r.price == null) {
-          const p = matchPrice(r.user, r.country);
-          if (p != null) r.price = p;
-        }
-      }
-    }
+    // 仍无单价的组（费用为 0 且无缓存单价）金额留空，导出后在提示中说明
 
     // 汇总（金额 = 计费基础 × 单价，即 成功条数 × 单价）
     let totalCount = 0, totalSuccess = 0, totalAmount = 0;
@@ -623,7 +584,6 @@
         reportRows = [];
         seenSig.clear();
         showBtn = false;
-        fetchTried = false;
         const btn = document.getElementById(BTN_ID);
         if (btn) btn.remove();
         log('离开报表页，数据已重置');
@@ -633,7 +593,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.3.1 启动', location.href);
+    log('v0.3.2 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
