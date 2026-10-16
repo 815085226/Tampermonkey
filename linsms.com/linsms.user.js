@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.10
+// @version      0.2.11
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -99,7 +99,8 @@
     const id = hasCampaignId ? deepFind(rec, ['campaignId', 'taskId']) : rec.id;
     if (id == null) return false;
     const name = deepFind(rec, ['taskName', 'campaignName', 'name', 'taskNo', 'campaignNo']) ?? null;
-    const tplNo = extractTplNo(rec);
+    // 实测真实字段优先：selectedChannelTemplateId（列表响应即携带，如 "6118"）
+    const tplNo = rec.selectedChannelTemplateId ?? extractTplNo(rec);
     // 以任务 id 为主键归档（Quick 随机名任务也能存），长数字任务名额外建别名
     const key = String(id);
     const prev = recById.get(key) || {};
@@ -119,13 +120,16 @@
       const q = new URL(url, location.href).search;
       if (q) lastTplQuery = q;
     } catch (e) { /* ignore */ }
-    const items = [];
-    const walk = (v, d) => {
-      if (d > 6 || v == null || typeof v !== 'object') return;
-      if (Array.isArray(v)) { v.forEach((x) => { if (x && typeof x === 'object' && !Array.isArray(x)) items.push(x); walk(x, d + 1); }); return; }
-      for (const k in v) walk(v[k], d + 1);
-    };
-    walk(data, 0);
+    // 实测响应结构：{ templates: [{id, content, ...}], ... }，优先精确提取
+    const items = Array.isArray(data?.templates) ? [...data.templates] : [];
+    if (!items.length) {
+      const walk = (v, d) => {
+        if (d > 6 || v == null || typeof v !== 'object') return;
+        if (Array.isArray(v)) { v.forEach((x) => { if (x && typeof x === 'object' && !Array.isArray(x)) items.push(x); walk(x, d + 1); }); return; }
+        for (const k in v) walk(v[k], d + 1);
+      };
+      walk(data, 0);
+    }
     if (!items.length) {
       // 打印响应结构，定位为什么解析不出模板（业务码封装/空列表/鉴权问题等）
       if (DEBUG) dwarn('channel-templates 无数组样本，响应结构:', JSON.stringify(data).slice(0, 600));
@@ -449,9 +453,10 @@
     }
     if (tplNo == null) return; // 拿不到编号就不注入
 
-    // 详情若直接带了文案字段，优先用（省一次模板映射查询）
-    const directContent = deepFind(rec, TPL_CONTENT_KEYS);
-    const content = directContent != null ? String(directContent) : tplContentMap.get(String(tplNo));
+    // 详情若直接带了"非空"文案字段才优先用（列表记录 content="" 是空串，不能算）
+    const dc = deepFind(rec, TPL_CONTENT_KEYS);
+    const directContent = dc != null && String(dc).trim() !== '' ? String(dc) : null;
+    const content = directContent != null ? directContent : tplContentMap.get(String(tplNo));
 
     rowDone.add(row);
     // 防止重复注入
