@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.3.0
+// @version      0.3.1
 // @description  mkt.linsms.com/campaigns 列表在"链接"列右侧新增"模板"列，显示任务关联的模版 id
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -32,7 +32,10 @@
         tplByCampaign.set(String(rec.campaignId), String(rec.selectedChannelTemplateId));
       }
     }
-    if (tplByCampaign.size) renderAll();
+    if (tplByCampaign.size) {
+      log(`任务→模板映射 ${tplByCampaign.size} 条，刷新列`);
+      renderAll();
+    }
   }
 
   function hookXhr() {
@@ -117,13 +120,16 @@
         headRow.children[colIdx].after(th);
       }
 
-      // 每行加对应单元格（只加一次）
+      // 每行插入/更新单元格（每次渲染都刷新内容，映射后到也能回填）
       for (const row of table.querySelectorAll('tbody tr')) {
-        if (row.querySelector('td[data-linsms-col]')) continue;
         const cell = row.cells?.[colIdx];
         if (!cell) continue;
-        const td = document.createElement('td');
-        td.dataset.linsmsCol = '1';
+        let td = row.querySelector('td[data-linsms-col]');
+        if (!td) {
+          td = document.createElement('td');
+          td.dataset.linsmsCol = '1';
+          cell.after(td);
+        }
 
         const cid = findCampaignId(row);
         const tplId = cid ? tplByCampaign.get(cid) : null;
@@ -131,8 +137,6 @@
         td.style.cssText = tplId
           ? 'color:#1565c0;font-weight:600;font-family:monospace;'
           : 'color:#999;';
-
-        cell.after(td);
       }
     }
   }
@@ -147,7 +151,9 @@
     clearTimeout(timer);
     timer = setTimeout(renderAll, 200);
   });
-  mo.observe(PAGE.document.documentElement, { childList: true, subtree: true });
+  const watch = () => mo.observe(PAGE.document.documentElement || PAGE.document, { childList: true, subtree: true });
+  if (PAGE.document.documentElement) watch();
+  else PAGE.document.addEventListener('readystatechange', watch, { once: true });
 
   PAGE.document.addEventListener('DOMContentLoaded', () => {
     renderAll();
