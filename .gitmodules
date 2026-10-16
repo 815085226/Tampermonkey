@@ -1,0 +1,3 @@
+[submodule "linsms.com"]
+	path = linsms.com
+	url = https://github.com/815085226/linsms.git
