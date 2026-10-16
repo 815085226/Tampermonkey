@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.1.4
+// @version      0.1.5
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -29,6 +29,9 @@
   const UP_USER_KEYS = USER_KEYS;
   const UP_PRICE_KEYS = ['unitPrice', 'price', 'smsPrice', 'salePrice', 'pricePerMsg', 'fee'];
   const UP_COUNTRY_KEYS = COUNTRY_KEYS;
+  // 日报记录自带的"费用"是总成本（如 0.703600=7036 条的总费用），不能当单价回退；
+  // 仅认明确的单价比率字段
+  const REPORT_OWN_PRICE_KEYS = ['unitPrice', 'price', 'smsPrice', 'salePrice', 'pricePerMsg'];
 
   // 单价缓存
   const PRICE_CACHE_KEY = 'linsms_userprice_map_v1';
@@ -36,6 +39,7 @@
 
   // 兜底：生成报表时若价格缺失，尝试主动拉取 user-products 列表接口
   const USER_PRODUCTS_API_CANDIDATES = [
+    '/api/v1/admin/user-products?pageNum=1&pageSize=2000',
     '/api/user-products?pageNum=1&pageSize=2000',
     '/api/user/products?pageNum=1&pageSize=2000',
     '/api/userProducts?pageNum=1&pageSize=2000',
@@ -383,14 +387,16 @@
   function fmt2(n) { return (Math.round(n * 100) / 100).toFixed(2); }
 
   async function generateReport() {
+    log('生成流程开始，内存记录', reportRows.length, '条');
     if (!reportRows.length) { alert('尚未捕获到报表数据，请先在页面完成查询'); return; }
 
     // 价格缺失时尝试兜底拉取
     const missing = reportRows.some((rec) => {
-      const user = norm(pick(rec, USER_KEYS));
-      const price = toNum(pick(rec, UP_PRICE_KEYS));
-      return user && matchPrice(user, getCountry(rec)) == null && isNaN(price);
+      const r = resolveRow(rec);
+      const own = toNum(pick(rec, REPORT_OWN_PRICE_KEYS));
+      return matchPrice(r.user, r.country) == null && isNaN(own);
     });
+    log('单价缺失检查:', missing ? '有缺失，尝试兜底接口' : '全部命中或可用自带单价');
     if (missing) await tryFetchUserProducts();
 
     // 分组：国家 | 企业 | 用户 | 通道
@@ -403,10 +409,10 @@
       const user = r.user;
       const channel = r.channel;
       const count = r.count;
-      // 单价优先 user-products 匹配，回退记录自带价格
+      // 单价优先 user-products 匹配，回退记录自带单价（费用总额不算）
       let price = matchPrice(user, country);
       if (price == null) {
-        const own = toNum(pick(rec, UP_PRICE_KEYS));
+        const own = toNum(pick(rec, REPORT_OWN_PRICE_KEYS));
         if (!isNaN(own)) price = own;
       }
       if (price == null) noPriceCount++;
@@ -447,6 +453,7 @@
       dwarn(`有 ${noPriceCount} 条记录未匹配到单价（金额留空）。请先访问 /user-products 页面，或核对用户名/国家字段`);
     }
 
+    log('分组完成:', rows.length, '组，条数合计', totalCount, '，金额合计', fmt2(totalAmount));
     const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const d = new Date();
     const pad = (n) => String(n).padStart(2, '0');
@@ -454,10 +461,12 @@
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = name;
+    a.style.display = 'none';
     document.body.appendChild(a);
+    log('触发下载:', name);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
     log(`已导出 ${name}：${rows.length} 组，计费条数合计 ${totalCount}，金额合计 ${fmt2(totalAmount)}`);
     if (noPriceCount > 0) alert(`已导出，但有 ${noPriceCount} 条记录未匹配到单价（金额留空）。\n请先访问 /user-products 页面后重试。`);
   }
@@ -491,7 +500,18 @@
       const span = document.createElement('span');
       span.textContent = '生产报表';
       btn.appendChild(span);
-      btn.addEventListener('click', () => { generateReport().catch((e) => { console.error(e); alert('生成报表失败：' + e.message); }); });
+      btn.addEventListener('click', () => {
+        log('按钮被点击');
+        try {
+          generateReport().then(
+            () => log('生成流程正常结束'),
+            (e) => { console.error(e); alert('生成报表失败：' + (e && e.message)); }
+          );
+        } catch (e) {
+          console.error(e);
+          alert('生成报表失败：' + (e && e.message));
+        }
+      });
     }
     if (btn.style.marginLeft !== '12px') btn.style.marginLeft = '12px';
     if (btn.previousElementSibling !== anchor || btn.parentNode !== anchor.parentNode) {
@@ -526,7 +546,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.1.4 启动', location.href);
+    log('v0.1.5 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
