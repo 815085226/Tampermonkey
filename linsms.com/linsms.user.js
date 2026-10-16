@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.2
+// @version      0.2.3
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -10,6 +10,7 @@
 // @connect      adm.linsms.com
 // @run-at       document-start
 // @grant        GM_info
+// @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -97,14 +98,19 @@
     scheduleRender();
   }
 
+  // 页面真实全局对象：grant 模式下沙箱内的 XMLHttpRequest/fetch 是副本，
+  // 直接 patch 拦不到页面发出的请求，必须钩 unsafeWindow
+  const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+
   function hookXhr() {
-    const origOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    const XHR = PAGE.XMLHttpRequest;
+    const origOpen = XHR.prototype.open;
+    XHR.prototype.open = function (method, url, ...rest) {
       this.__linsmsUrl = url;
       return origOpen.call(this, method, url, ...rest);
     };
-    const origSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.send = function (...args) {
+    const origSend = XHR.prototype.send;
+    XHR.prototype.send = function (...args) {
       this.addEventListener('load', function () {
         const url = this.__linsmsUrl || '';
         if (!/linsms\.com/.test(location.host) && !url.includes('linsms.com')) return;
@@ -122,9 +128,9 @@
   }
 
   function hookFetch() {
-    const origFetch = window.fetch;
-    window.fetch = async function (...args) {
-      const res = await origFetch.apply(this, args);
+    const origFetch = PAGE.fetch;
+    PAGE.fetch = async function (...args) {
+      const res = await origFetch.apply(PAGE, args);
       try {
         const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
         if (/\.(js|css|png|jpe?g|gif|svg|woff2?|ttf|ico|map)(\?|$)/i.test(url)) return res;
