@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.2.0
+// @version      0.2.1
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/通道 汇总导出 CSV，单价从 /user-products 按 用户名+国家 匹配（国家为 ISO2 码，如 BR/ID/IN/MX）
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -431,15 +431,6 @@
     log('生成流程开始，内存记录', reportRows.length, '条');
     if (!reportRows.length) { alert('尚未捕获到报表数据，请先在页面完成查询'); return; }
 
-    // 价格缺失时尝试兜底拉取
-    const missing = reportRows.some((rec) => {
-      const r = resolveRow(rec);
-      const own = toNum(pick(rec, REPORT_OWN_PRICE_KEYS));
-      return matchPrice(r.user, r.country) == null && isNaN(own);
-    });
-    log('单价缺失检查:', missing ? '有缺失，尝试兜底接口' : '全部命中或可用自带单价');
-    if (missing) await tryFetchUserProducts();
-
     // 分组：国家 | 企业 | 用户 | 通道
     const groups = new Map();
     for (const rec of reportRows) {
@@ -483,6 +474,18 @@
       }
     }
     if (derivedCount > 0) log(`单价推导: ${derivedCount} 组按 费用÷成功条数 计算`);
+
+    // 仍有组既无费用又无单价 → 才兜底探测 user-products 接口（避免每次点击都慢速探测）
+    if (rows.some((r) => r.price == null && r.fee <= 0)) {
+      log('存在无费用且无单价的组，尝试兜底拉取 user-products');
+      await tryFetchUserProducts();
+      for (const r of rows) {
+        if (r.price == null) {
+          const p = matchPrice(r.user, r.country);
+          if (p != null) r.price = p;
+        }
+      }
+    }
 
     // 汇总（金额 = 计费基础 × 单价，即 成功条数 × 单价）
     let totalCount = 0, totalSuccess = 0, totalAmount = 0;
@@ -559,15 +562,22 @@
       span.textContent = '生产报表';
       btn.appendChild(span);
       btn.addEventListener('click', () => {
+        if (btn.disabled) { log('生成中，忽略重复点击'); return; }
         log('按钮被点击');
+        btn.disabled = true;
+        const spanEl = btn.querySelector('span');
+        const oldText = spanEl ? spanEl.textContent : '';
+        if (spanEl) spanEl.textContent = '生成中…';
+        const restore = () => { btn.disabled = false; if (spanEl) spanEl.textContent = oldText; };
         try {
           generateReport().then(
-            () => log('生成流程正常结束'),
-            (e) => { console.error(e); alert('生成报表失败：' + (e && e.message)); }
+            () => { log('生成流程正常结束'); restore(); },
+            (e) => { console.error(e); alert('生成报表失败：' + (e && e.message)); restore(); }
           );
         } catch (e) {
           console.error(e);
           alert('生成报表失败：' + (e && e.message));
+          restore();
         }
       });
     }
@@ -604,7 +614,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.2.0 启动', location.href);
+    log('v0.2.1 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
