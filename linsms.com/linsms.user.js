@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.4
+// @version      0.2.5
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -25,6 +25,7 @@
   // 任务详情接口候选（{id} 会被替换）——已按 2026-10-16 实测嗅探收敛
   const DETAIL_API_CANDIDATES = [
     '/api/v1/customer/campaigns/{id}',
+    '/api/v1/customer/campaigns/detail/{id}',
     '/api/v1/customer/campaign/{id}',
   ];
 
@@ -48,7 +49,10 @@
   const dwarn = (...a) => DEBUG && console.warn('%c[linsms]', 'color:#ff9800;font-weight:bold', ...a);
 
   const campaignMap = new Map();   // taskName -> { id, tplNo, ...raw }
+  const idIndex = new Map();       // String(campaignId) -> taskName
+  const detailTried = new Set();   // 已探测过详情的任务 id
   const tplContentMap = new Map(); // tplNo -> content
+  let lastTplQuery = '';           // 最近一次嗅探到的 channel-templates 查询串（含 countryCode）
   const rowDone = new WeakSet();   // 已注入的行
 
   /* ---------------- 1. 网络嗅探：捕获列表/详情接口 ---------------- */
@@ -77,12 +81,17 @@
     const tplNo = deepFind(rec, TPL_NO_KEYS);
     const prev = campaignMap.get(name) || {};
     campaignMap.set(name, { ...prev, ...rec, id: id ?? prev.id, tplNo: tplNo ?? prev.tplNo });
+    if (id != null) idIndex.set(String(id), name);
     if (DEBUG) log('捕获任务记录:', name, 'tplNo=', tplNo ?? '(无)', rec);
     return true;
   }
 
   function absorbTemplates(data, url) {
     if (!url || !url.includes('channel-templates')) return;
+    try {
+      const q = new URL(url, location.href).search;
+      if (q) lastTplQuery = q;
+    } catch (e) { /* ignore */ }
     const items = [];
     const walk = (v, d) => {
       if (d > 6 || v == null || typeof v !== 'object') return;
@@ -90,7 +99,11 @@
       for (const k in v) walk(v[k], d + 1);
     };
     walk(data, 0);
-    if (!items.length) return;
+    if (!items.length) {
+      // 打印响应结构，定位为什么解析不出模板（业务码封装/空列表/鉴权问题等）
+      if (DEBUG) dwarn('channel-templates 无数组样本，响应结构:', JSON.stringify(data).slice(0, 600));
+      return;
+    }
     // id + 内容字段的通用映射；URL 已限定为模板接口，id 取值安全
     let hit = 0;
     for (const item of items) {
@@ -219,7 +232,11 @@
   }
 
   async function buildTplMap() {
-    for (const { host, path } of TEMPLATE_API_CANDIDATES) {
+    // 优先复用嗅探到的查询串（含 countryCode，探测空参可能返回空列表）
+    const dynamic = lastTplQuery
+      ? [{ host: '', path: '/api/v1/customer/channel-templates' + lastTplQuery }]
+      : [];
+    for (const { host, path } of [...dynamic, ...TEMPLATE_API_CANDIDATES]) {
       const base = host || location.origin;
       const url = base + path;
       const { status, data } = await gmGet(url);
@@ -252,8 +269,7 @@
         return true;
       }
     }
-    dwarn('所有模板接口候选均未命中，请查看控制台确认真实接口');
-    updatePendingContent(true);
+    dwarn('模板接口候选未命中（稍后自动重试，请留意控制台样本输出）');
     return false;
   }
 
@@ -284,8 +300,19 @@
   }
 
   function getTaskNameFromRow(row) {
-    // 任务列中较长纯数字串
-    const m = (row.textContent || '').match(/\b(\d{10,})\b/);
+    const text = row.textContent || '';
+    // 1) 行内 10+ 位纯数字 = 任务名本身
+    const m = text.match(/\b(\d{10,})\b/);
+    if (m && campaignMap.has(m[1])) return m[1];
+    // 2) 任务单元格里的短数字（如 6725）= 任务 ID，反查嗅探记录
+    const taskCell = row.cells?.[1];
+    if (taskCell) {
+      const nums = taskCell.textContent.match(/(?<![/:\d.])(\d{2,8})(?![/:\d.])/g) || [];
+      for (const n of nums) {
+        const name = idIndex.get(n);
+        if (name) return name;
+      }
+    }
     return m ? m[1] : null;
   }
 
@@ -299,8 +326,9 @@
     let rec = campaignMap.get(taskName);
     let tplNo = rec?.tplNo;
 
-    // 列表接口没带模板编号 → 探测详情接口
-    if (tplNo == null && rec?.id != null) {
+    // 列表接口没带模板编号 → 探测详情接口（每个 id 只探一次，防刷屏）
+    if (tplNo == null && rec?.id != null && !detailTried.has(String(rec.id))) {
+      detailTried.add(String(rec.id));
       await fetchDetail(rec.id);
       rec = campaignMap.get(taskName);
       tplNo = rec?.tplNo;
@@ -364,9 +392,16 @@
     log(`v${ver} 启动`, location.href);
     loadTplCache();
 
-    // 页面在 /campaigns 时加载模板映射（不依赖嗅探）
+    // 页面在 /campaigns 时加载模板映射（不依赖嗅探）；
+    // 5s 后若仍无模板数据，带上嗅探到的查询串（countryCode 等）重试一次
     if (/\/campaigns/.test(location.pathname + location.hash)) {
       buildTplMap();
+      setTimeout(() => {
+        if (tplContentMap.size === 0) {
+          log('模板映射为空，复用嗅探查询串重试');
+          buildTplMap();
+        }
+      }, 5000);
     }
 
     const mo = new MutationObserver(() => scheduleRender());
