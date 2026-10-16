@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.7
+// @version      0.2.8
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -73,6 +73,18 @@
     return undefined;
   }
 
+  // 模板编号提取：平铺字段 → 嵌套 template/templateInfo 对象的 id
+  function extractTplNo(rec) {
+    let no = deepFind(rec, TPL_NO_KEYS);
+    if (no == null) {
+      for (const k of ['template', 'templateInfo', 'channelTemplate']) {
+        const t = rec[k];
+        if (t && typeof t === 'object' && t.id != null) return t.id;
+      }
+    }
+    return no;
+  }
+
   function tryAbsorbRecord(rec) {
     if (!rec || typeof rec !== 'object') return false;
     // 形状门槛：campaignId/taskId 显式存在；或 id+name+type 且不含文案字段
@@ -86,7 +98,7 @@
     const id = hasCampaignId ? deepFind(rec, ['campaignId', 'taskId']) : rec.id;
     if (id == null) return false;
     const name = deepFind(rec, ['taskName', 'campaignName', 'name', 'taskNo', 'campaignNo']) ?? null;
-    const tplNo = deepFind(rec, TPL_NO_KEYS);
+    const tplNo = extractTplNo(rec);
     // 以任务 id 为主键归档（Quick 随机名任务也能存），长数字任务名额外建别名
     const key = String(id);
     const prev = recById.get(key) || {};
@@ -278,6 +290,8 @@
       const { status, data } = await gmGet(url);
       if (DEBUG) log(`详情探测 ${status}`, url);
       if (data) {
+        // 打印详情响应结构，确认模板编号的真实字段名
+        if (DEBUG) log(`详情响应 ${id}:`, JSON.stringify(data).slice(0, 1000));
         absorbJson(data, url);
         return data;
       }
