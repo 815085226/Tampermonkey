@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.2.3
+// @version      0.2.4
 // @description  mkt.linsms.com/campaigns 列表"链接"列后显示模版编号 + 模版内容（优先现有接口，回退 adm.linsms.com/channel-templates）
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
@@ -22,23 +22,18 @@
   /* ================= 可配置区（根据实际接口调整） ================= */
   const DEBUG = true; // 控制台打印所有嗅探到的接口，便于定位真实 API
 
-  // 任务详情接口候选（按顺序探测，{id} 会被替换）
+  // 任务详情接口候选（{id} 会被替换）——已按 2026-10-16 实测嗅探收敛
   const DETAIL_API_CANDIDATES = [
-    '/api/campaigns/{id}',
-    '/api/campaign/{id}',
-    '/mkt/api/campaigns/{id}',
-    '/api/task/campaigns/{id}',
-    '/api/campaigns/detail/{id}',
+    '/api/v1/customer/campaigns/{id}',
+    '/api/v1/customer/campaign/{id}',
   ];
 
-  // 模板列表接口候选（mkt 侧优先，失败回退 adm 侧）
+  // 模板列表接口候选（host 留空 = mkt 同源；失败再回退 adm）
   const TEMPLATE_API_CANDIDATES = [
-    { host: 'http://mkt.linsms.com', path: '/api/channel-templates?pageNum=1&pageSize=500' },
-    { host: 'http://mkt.linsms.com', path: '/api/channel/templates?pageNum=1&pageSize=500' },
-    { host: 'http://mkt.linsms.com', path: '/api/templates?pageNum=1&pageSize=500' },
-    { host: 'http://adm.linsms.com', path: '/api/channel-templates?pageNum=1&pageSize=500' },
-    { host: 'http://adm.linsms.com', path: '/api/channel/templates?pageNum=1&pageSize=500' },
-    { host: 'http://adm.linsms.com', path: '/api/templates?pageNum=1&pageSize=500' },
+    { host: '', path: '/api/v1/customer/channel-templates?pageSize=500' },
+    { host: '', path: '/api/v1/customer/channel-templates' },
+    { host: 'http://adm.linsms.com', path: '/api/v1/customer/channel-templates?pageSize=500' },
+    { host: 'http://adm.linsms.com', path: '/api/v1/customer/channel-templates' },
   ];
 
   // 模板编号字段候选 / 模板内容字段候选
@@ -86,7 +81,37 @@
     return true;
   }
 
-  function absorbJson(data) {
+  function absorbTemplates(data, url) {
+    if (!url || !url.includes('channel-templates')) return;
+    const items = [];
+    const walk = (v, d) => {
+      if (d > 6 || v == null || typeof v !== 'object') return;
+      if (Array.isArray(v)) { v.forEach((x) => { if (x && typeof x === 'object' && !Array.isArray(x)) items.push(x); walk(x, d + 1); }); return; }
+      for (const k in v) walk(v[k], d + 1);
+    };
+    walk(data, 0);
+    if (!items.length) return;
+    // id + 内容字段的通用映射；URL 已限定为模板接口，id 取值安全
+    let hit = 0;
+    for (const item of items) {
+      const no = deepFind(item, ['id', ...TPL_NO_KEYS]);
+      const content = deepFind(item, TPL_CONTENT_KEYS);
+      if (no != null && content != null) {
+        tplContentMap.set(String(no), String(content));
+        hit++;
+      }
+    }
+    if (hit > 0) {
+      log(`从嗅探吸收模板 ${hit} 条（累计 ${tplContentMap.size}）`);
+      saveTplCache();
+      updatePendingContent();
+    } else if (DEBUG) {
+      // 字段名没猜中：打印首条样本，据此调整 TPL_NO_KEYS / TPL_CONTENT_KEYS
+      dwarn('channel-templates 首条样本:', JSON.stringify(items[0]).slice(0, 800));
+    }
+  }
+
+  function absorbJson(data, url) {
     if (!data || typeof data !== 'object') return;
     const scan = (v, depth) => {
       if (depth > 6 || v == null || typeof v !== 'object') return;
@@ -95,6 +120,7 @@
       for (const k in v) scan(v[k], depth + 1);
     };
     scan(data, 0);
+    absorbTemplates(data, url);
     scheduleRender();
   }
 
@@ -120,7 +146,7 @@
         if (DEBUG) log(`XHR ${this.status} [${ct.split(';')[0] || '-'}]`, url);
         try {
           const data = JSON.parse(this.responseText);
-          absorbJson(data);
+          absorbJson(data, url);
         } catch (e) { /* 非 JSON 忽略 */ }
       });
       return origSend.apply(this, args);
@@ -139,7 +165,7 @@
         const clone = res.clone();
         clone.text().then((t) => {
           try {
-            absorbJson(JSON.parse(t));
+            absorbJson(JSON.parse(t), url);
           } catch (e) { /* 非 JSON 忽略 */ }
         }).catch(() => {});
       } catch (e) { /* ignore */ }
@@ -194,7 +220,8 @@
 
   async function buildTplMap() {
     for (const { host, path } of TEMPLATE_API_CANDIDATES) {
-      const url = host + path;
+      const base = host || location.origin;
+      const url = base + path;
       const { status, data } = await gmGet(url);
       if (DEBUG) log(`模板探测 ${status}`, url);
       if (!data) continue;
@@ -219,14 +246,31 @@
         }
       }
       if (hit > 0) {
-        log(`模板接口命中: ${host}${path}，共 ${hit} 条模板`);
+        log(`模板接口命中: ${base}${path}，共 ${hit} 条模板`);
         saveTplCache();
-        scheduleRender();
+        updatePendingContent();
         return true;
       }
     }
     dwarn('所有模板接口候选均未命中，请查看控制台确认真实接口');
+    updatePendingContent(true);
     return false;
+  }
+
+  // 模板映射到位后，回填已注入行里的"获取中…"占位
+  function updatePendingContent(failed) {
+    document.querySelectorAll('.linsms-tpl-content[data-linsms-pending]').forEach((el) => {
+      const no = el.dataset.linsmsPending;
+      const content = tplContentMap.get(String(no));
+      if (content != null) {
+        el.textContent = content;
+        delete el.dataset.linsmsPending;
+      } else if (failed) {
+        el.textContent = '未找到模版内容（接口未命中）';
+        el.dataset.linsmsFailed = '1';
+        delete el.dataset.linsmsPending;
+      }
+    });
   }
 
   /* ---------------- 3. 渲染：链接列后追加模版编号/内容 ---------------- */
@@ -263,6 +307,10 @@
     }
     if (tplNo == null) return; // 拿不到编号就不注入
 
+    // 详情若直接带了文案字段，优先用（省一次模板映射查询）
+    const directContent = rec ? deepFind(rec, TPL_CONTENT_KEYS) : null;
+    const content = directContent != null ? String(directContent) : tplContentMap.get(String(tplNo));
+
     rowDone.add(row);
     // 防止重复注入
     if (cell.querySelector('.linsms-tpl')) return;
@@ -276,7 +324,6 @@
     noLine.style.cssText = 'color:#3f51b5;font-weight:600;';
     wrap.appendChild(noLine);
 
-    const content = tplContentMap.get(String(tplNo));
     const contentLine = document.createElement('div');
     contentLine.className = 'linsms-tpl-content';
     contentLine.style.cssText = 'color:#666;max-width:260px;white-space:normal;word-break:break-all;';
@@ -308,6 +355,7 @@
       const rows = table.querySelectorAll('tbody tr');
       for (const row of rows) renderRow(table, row, colIdx);
     }
+    updatePendingContent();
   }
 
   /* ---------------- 4. 启动 ---------------- */
