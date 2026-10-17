@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.3.4
+// @version      0.3.5
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/供应商 汇总导出 XLSX（企业列与小计列按客户合并单元格），单价从 /user-products 匹配或按 费用÷成功条数 推导
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -596,16 +596,21 @@
           }
           setTimeout(() => { setTxt(oldText); btn.disabled = false; exporting = false; }, 2000);
         };
-        try {
-          generateReport().then(
-            () => { log('生成流程正常结束'); finish(true); },
-            (e) => { console.error(e); alert('生成报表失败：' + (e && e.message)); finish(false); }
-          );
-        } catch (e) {
-          console.error(e);
-          alert('生成报表失败：' + (e && e.message));
-          finish(false);
-        }
+        // 关键：导出是同步重活会阻塞主线程——若在同一帧内执行，
+        // 「生成中…」永远来不及绘制，表现为点击后卡一下然后状态秒跳。
+        // 先等浏览器把反馈绘制出来，再开始导出。
+        setTimeout(() => {
+          try {
+            generateReport().then(
+              () => { log('生成流程正常结束'); finish(true); },
+              (e) => { console.error(e); alert('生成报表失败：' + (e && e.message)); finish(false); }
+            );
+          } catch (e) {
+            console.error(e);
+            alert('生成报表失败：' + (e && e.message));
+            finish(false);
+          }
+        }, 80);
       });
     }
     if (btn.style.marginLeft !== '12px') btn.style.marginLeft = '12px';
@@ -640,7 +645,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.3.4 启动', location.href);
+    log('v0.3.5 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
