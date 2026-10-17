@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         linsms
 // @namespace    gavin.linsms
-// @version      0.4.0
-// @description  mkt campaigns 列表"链接"列后新增"模板"列（模版id+文案）；文案从 adm 已登录会话自动学习获取。不保存任何账号密码。
+// @version      0.5.0
+// @description  mkt campaigns 列表"链接"列后新增"模板"列（模版id+文案，悬停可快捷复制）；文案从 adm 已登录会话自动学习获取。不保存任何账号密码。
 // @author       Gavin
 // @match        *://mkt.linsms.com/*
 // @match        *://adm.linsms.com/*
@@ -205,6 +205,67 @@
   }
 
   /* ============ 4. 行匹配与渲染 ============ */
+  function makeCopyBtn(text, label) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'linsms-copy';
+    btn.dataset.copy = text;      // 复制完整内容（非截断显示）
+    btn.dataset.label = label;
+    btn.textContent = '复制';
+    btn.title = '点击复制' + label;
+    return btn;
+  }
+
+  async function copyText(text) {
+    try {
+      await PAGE.navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        return ok;
+      } catch (e2) { return false; }
+    }
+  }
+
+  function showToast(msg) {
+    const t = document.createElement('div');
+    t.textContent = msg;
+    t.style.cssText =
+      'position:fixed;right:16px;bottom:40px;z-index:100000;background:#323232;color:#fff;' +
+      'font:12px/1.6 sans-serif;padding:6px 12px;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.25);transition:opacity .3s;';
+    (document.body || document.documentElement).appendChild(t);
+    setTimeout(() => { t.style.opacity = '0'; }, 1200);
+    setTimeout(() => t.remove(), 1600);
+  }
+
+  // 事件委托：复制按钮点击（DOM 会被重复渲染，委托最稳）
+  PAGE.document.addEventListener('click', (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest('.linsms-copy') : null;
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    copyText(btn.dataset.copy || '').then((ok) => {
+      showToast(ok ? `已复制${btn.dataset.label || ''}` : '复制失败，请手动复制');
+    });
+  }, true);
+
+  function injectStyle() {
+    if (document.getElementById('linsms-style')) return;
+    const s = document.createElement('style');
+    s.id = 'linsms-style';
+    s.textContent =
+      '.linsms-copy{opacity:0;transition:opacity .15s;cursor:pointer;border:1px solid #c5cae9;' +
+      'background:#e8eaf6;color:#3f51b5;border-radius:3px;font-size:10px;padding:0 5px;line-height:16px;flex:none;}' +
+      'tr:hover .linsms-copy{opacity:1;}.linsms-copy:hover{background:#c5cae9;}';
+    (document.head || document.documentElement).appendChild(s);
+  }
   function findCampaignId(row) {
     for (const el of row.querySelectorAll('*')) {
       if (el.childElementCount !== 0) continue;
@@ -254,16 +315,24 @@
           continue;
         }
         const content = tplContent.get(tplId);
-        if (content) td.title = content;
+        if (content) td.title = '';
         td.innerHTML = '';
         const idLine = document.createElement('div');
-        idLine.textContent = tplId;
-        idLine.style.cssText = 'color:#1565c0;font-weight:600;font-family:monospace;';
+        idLine.style.cssText = 'display:flex;align-items:center;gap:4px;';
+        const idText = document.createElement('span');
+        idText.textContent = tplId;
+        idText.style.cssText = 'color:#1565c0;font-weight:600;font-family:monospace;';
+        idLine.appendChild(idText);
+        idLine.appendChild(makeCopyBtn(tplId, '模板id'));
         td.appendChild(idLine);
         const cLine = document.createElement('div');
         if (content) {
-          cLine.textContent = content.length > 60 ? content.slice(0, 60) + '…' : content;
-          cLine.style.cssText = 'color:#666;font-size:11px;max-width:260px;white-space:pre-wrap;word-break:break-all;';
+          const cText = document.createElement('span');
+          cText.textContent = content.length > 60 ? content.slice(0, 60) + '…' : content;
+          cLine.style.cssText = 'display:flex;align-items:flex-start;gap:4px;';
+          cText.style.cssText = 'color:#666;font-size:11px;white-space:pre-wrap;word-break:break-all;';
+          cLine.appendChild(cText);
+          cLine.appendChild(makeCopyBtn(content, '模板文案'));
         } else {
           cLine.textContent = '文案未获取（打开 adm 模板页后自动补全）';
           cLine.style.cssText = 'color:#bbb;font-size:11px;';
@@ -307,6 +376,7 @@
     else PAGE.document.addEventListener('readystatechange', watch, { once: true });
 
     PAGE.document.addEventListener('DOMContentLoaded', () => {
+      injectStyle();
       renderAll();
       setTimeout(loadListDirect, 1000);
       setTimeout(fetchAdmTemplates, 2500); // 有 adm 会话数据则补全文案
