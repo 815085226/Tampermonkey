@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.3.3
+// @version      0.3.4
 // @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/供应商 汇总导出 XLSX（企业列与小计列按客户合并单元格），单价从 /user-products 匹配或按 费用÷成功条数 推导
 // @author       Gavin
 // @match        http://adm.linsms.com/*
@@ -526,6 +526,28 @@
   /* ---------------- 按钮：插在「查询日报」前 ---------------- */
   const BTN_ID = 'linsms-prod-report-btn';
 
+  // 全局 Toast 提示（顶部居中，自动消失）——点击后立即给可见反馈，避免误以为没响应
+  function showToast(msg) {
+    const id = 'linsms-report-toast';
+    let t = document.getElementById(id);
+    if (!t) {
+      t = document.createElement('div');
+      t.id = id;
+      t.style.cssText = 'position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:99999;'
+        + 'background:#303133;color:#fff;padding:10px 22px;border-radius:6px;font-size:14px;'
+        + 'box-shadow:0 4px 12px rgba(0,0,0,.2);transition:opacity .3s;pointer-events:none;';
+      document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.style.display = 'block';
+    t.style.opacity = '1';
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => {
+      t.style.opacity = '0';
+      setTimeout(() => { t.style.display = 'none'; }, 300);
+    }, 2200);
+  }
+
   function findAnchorBtn() {
     for (const b of document.querySelectorAll('button')) {
       const t = (b.textContent || '').replace(/\s/g, '');
@@ -550,25 +572,39 @@
       btn.className = 'el-button el-button--warning';
       btn.type = 'button';
       const span = document.createElement('span');
-      span.textContent = '生产报表';
+      span.textContent = '生成报表';
       btn.appendChild(span);
+      let exporting = false; // 模块级防重：生成+反馈展示期间忽略点击
       btn.addEventListener('click', () => {
-        if (btn.disabled) { log('生成中，忽略重复点击'); return; }
+        if (exporting) { log('生成中，忽略重复点击'); return; }
         log('按钮被点击');
+        exporting = true;
         btn.disabled = true;
         const spanEl = btn.querySelector('span');
         const oldText = spanEl ? spanEl.textContent : '';
-        if (spanEl) spanEl.textContent = '生成中…';
-        const restore = () => { btn.disabled = false; if (spanEl) spanEl.textContent = oldText; };
+        const setTxt = (t) => { if (spanEl) spanEl.textContent = t; };
+        setTxt('生成中…');
+        showToast('正在生成报表，请稍候…');
+        // 导出同步完成后浏览器弹出下载仍有 1-3 秒延迟，
+        // 按钮保持「已生成」状态 2 秒再恢复，避免误判为无响应而重复点击
+        const finish = (ok) => {
+          if (ok) {
+            setTxt('✓ 已生成，下载中');
+            showToast('报表已生成，文件开始下载');
+          } else {
+            setTxt(oldText);
+          }
+          setTimeout(() => { setTxt(oldText); btn.disabled = false; exporting = false; }, 2000);
+        };
         try {
           generateReport().then(
-            () => { log('生成流程正常结束'); restore(); },
-            (e) => { console.error(e); alert('生成报表失败：' + (e && e.message)); restore(); }
+            () => { log('生成流程正常结束'); finish(true); },
+            (e) => { console.error(e); alert('生成报表失败：' + (e && e.message)); finish(false); }
           );
         } catch (e) {
           console.error(e);
           alert('生成报表失败：' + (e && e.message));
-          restore();
+          finish(false);
         }
       });
     }
@@ -604,7 +640,7 @@
 
   /* ---------------- 启动 ---------------- */
   function boot() {
-    log('v0.3.3 启动', location.href);
+    log('v0.3.4 启动', location.href);
     loadPriceCache();
     hookXhr();
     hookFetch();
