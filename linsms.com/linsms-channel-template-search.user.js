@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         linsms 通道模板-通道下拉模糊搜索
 // @namespace    https://github.com/815085226/Tampermonkey
-// @version      0.2.1
-// @description  adm.linsms.com 多页面筛选下拉框支持输入模糊搜索（channel-templates、channel-test、monitoring-reports、messages）：下拉框上叠加搜索输入框，输入即筛选选项，选中后同步回原生 select 并触发 change（Vue 照常响应）
+// @version      0.3.0
+// @description  adm.linsms.com 多页面筛选下拉框支持输入模糊搜索（channel-templates、channel-test、monitoring-reports、messages、submit-failures、send-progress、data-export、ban-terminations）：企业/企业用户/用户/产品/通道 下拉框上叠加搜索输入框，输入即筛选，选中后同步回原生 select 并触发 change（Vue 照常响应）
 // @match        http://adm.linsms.com/*
 // @match        https://adm.linsms.com/*
 // @run-at       document-idle
@@ -38,9 +38,9 @@
     if (/channel-templates|channel-test/i.test(location.pathname)) {
       return first.includes('请选择通道');
     }
-    if (/monitoring-reports|\/messages/i.test(location.pathname)) {
+    if (/monitoring-reports|\/messages|submit-failures|send-progress|data-export|ban-terminations/i.test(location.pathname)) {
       if (/^(全部用户|全部企业|全部产品|全部通道|请选择通道)/.test(first)) return true;
-      return /^(企业用户|企业|产品|通道)$/.test(labelOf(sel));
+      return /^(企业用户|企业|用户|产品|通道)$/.test(labelOf(sel));
     }
     return false;
   }
@@ -162,7 +162,7 @@
   }
 
   function scan() {
-    if (!/channel-templates|channel-test|monitoring-reports|\/messages/i.test(location.pathname)) return;
+    if (!/channel-templates|channel-test|monitoring-reports|\/messages|submit-failures|send-progress|data-export|ban-terminations/i.test(location.pathname)) return;
     for (const sel of document.querySelectorAll('select')) {
       if (!sel.dataset[MARK] && isTargetSelect(sel)) enhance(sel);
     }
@@ -173,7 +173,7 @@
     scan();
     new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
     setInterval(scan, 2000);
-    log('v0.2.1 启动', location.href);
+    log('v0.3.0 启动', location.href);
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
