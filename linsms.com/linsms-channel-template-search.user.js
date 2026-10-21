@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 通道模板-通道下拉模糊搜索
 // @namespace    https://github.com/815085226/Tampermonkey
-// @version      0.3.1
+// @version      0.3.2
 // @description  adm.linsms.com 多页面筛选下拉框支持输入模糊搜索（channel-templates、channel-test、monitoring-reports、messages、submit-failures、send-progress、data-export、ban-terminations）：企业/企业用户/用户/产品/通道 下拉框上叠加搜索输入框，输入即筛选，选中后同步回原生 select 并触发 change（Vue 照常响应）
 // @match        http://adm.linsms.com/*
 // @match        https://adm.linsms.com/*
@@ -70,18 +70,27 @@
     const firstText = sel.options[0] ? (sel.options[0].textContent || '').trim() : '';
     const isAllPlaceholder = /^(全部|请选择)/.test(firstText);
 
-    // 覆盖在 select 上的搜索输入框（不透明背景盖住原生框，铺满 wrapper）
+    // 覆盖在 select 上的搜索输入框：完整复制 select 计算样式（背景/边框/圆角/阴影/内边距/字体），
+    // 视觉上与原生控件保持一致，另补一个同风格 ⇕ 箭头
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = firstText ? `${firstText}（可输入搜索）` : '可输入搜索';
+    const padRight = Math.max(parseFloat(cs.paddingRight) || 0, 26);
     input.style.cssText = [
       'position:absolute', 'left:0', 'top:0', 'width:100%', 'height:100%',
+      'appearance:none', '-webkit-appearance:none',
+      `background-color:${cs.backgroundColor}`,
       `border:${cs.borderTopWidth} ${cs.borderTopStyle} ${cs.borderTopColor}`,
       `border-radius:${cs.borderTopLeftRadius}`,
-      `font:${cs.font}`,
-      'padding:0 10px', 'background:#fff', 'outline:none',
-      'box-sizing:border-box', 'color:#606266', 'cursor:text',
+      `box-shadow:${cs.boxShadow}`,
+      `padding:${cs.paddingTop} ${padRight}px ${cs.paddingBottom} ${cs.paddingLeft}`,
+      `font:${cs.font}`, `letter-spacing:${cs.letterSpacing}`, `color:${cs.color}`,
+      'outline:none', 'box-sizing:border-box', 'cursor:text', 'text-align:left',
     ].join(';');
+    // 模拟原生 select 的 ⇕ 箭头（灰色双箭头 SVG）
+    input.style.backgroundImage = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='14' viewBox='0 0 10 14'%3E%3Cpath d='M1.5 4.5L5 1l3.5 3.5M1.5 9.5L5 13l3.5-3.5' fill='none' stroke='%23999' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\")";
+    input.style.backgroundRepeat = 'no-repeat';
+    input.style.backgroundPosition = `right ${Math.max(padRight - 20, 8)}px center`;
     const syncInput = () => {
       const ft = sel.options[0] ? (sel.options[0].textContent || '').trim() : '';
       const allPh = /^(全部|请选择)/.test(ft);
@@ -184,7 +193,7 @@
     scan();
     new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
     setInterval(scan, 2000);
-    log('v0.3.1 启动', location.href);
+    log('v0.3.2 启动', location.href);
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
