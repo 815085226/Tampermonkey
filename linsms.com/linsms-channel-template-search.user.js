@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 通道模板-通道下拉模糊搜索
 // @namespace    https://github.com/815085226/Tampermonkey
-// @version      0.3.3
+// @version      0.3.4
 // @description  adm.linsms.com 多页面筛选下拉框支持输入模糊搜索（channel-templates、channel-test、monitoring-reports、messages、submit-failures、send-progress、data-export、ban-terminations）：企业/企业用户/用户/产品/通道 下拉框上叠加搜索输入框，输入即筛选，选中后同步回原生 select 并触发 change（Vue 照常响应）
 // @match        http://adm.linsms.com/*
 // @match        https://adm.linsms.com/*
@@ -62,24 +62,11 @@
 
     const cs = getComputedStyle(sel);
 
-    // 包一层便于绝对定位（输入框覆盖 select、列表挂在下方）。
-    // 关键：wrapper 必须完整继承 select 的布局角色（宽度/margin/flex 等），
-    // 否则 select 脱离父级拉伸上下文会导致筛选栏排版变形
-    const wrap = document.createElement('div');
-    wrap.style.cssText = 'position:relative;box-sizing:border-box;'
-      + `display:${cs.display === 'inline' ? 'inline-block' : cs.display};`
-      + `width:${cs.width};`
-      + `height:${cs.height};`
-      + `margin:${cs.marginTop} ${cs.marginRight} ${cs.marginBottom} ${cs.marginLeft};`;
-    if (cs.flexGrow && cs.flexGrow !== '0') {
-      wrap.style.flex = `${cs.flexGrow} ${cs.flexShrink} ${cs.flexBasis}`;
-    }
-    if (cs.alignSelf && cs.alignSelf !== 'auto') wrap.style.alignSelf = cs.alignSelf;
-    sel.parentNode.insertBefore(wrap, sel);
-    wrap.appendChild(sel);
-    sel.style.width = '100%';
-    // 原生控件不再渲染（保留占位尺寸），避免其文字与箭头从输入框底下透出
-    sel.style.visibility = 'hidden';
+    // 不改动 DOM 结构：select 原样留在原位（维持 flex 布局与尺寸），
+    // 输入框绝对定位覆盖在 select 上方——避免包裹节点破坏筛选栏排版
+    const parent = sel.parentElement;
+    if (!parent) return;
+    if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
 
     const firstText = sel.options[0] ? (sel.options[0].textContent || '').trim() : '';
     const isAllPlaceholder = /^(全部|请选择)/.test(firstText);
@@ -91,7 +78,7 @@
     input.placeholder = firstText ? `${firstText}（可输入搜索）` : '可输入搜索';
     const padRight = Math.max(parseFloat(cs.paddingRight) || 0, 26);
     input.style.cssText = [
-      'position:absolute', 'left:0', 'top:0', 'width:100%', 'height:100%',
+      'position:absolute', 'z-index:6', 'box-sizing:border-box',
       'appearance:none', '-webkit-appearance:none',
       `background-color:${resolveBg(sel)}`,
       `border:${cs.borderTopWidth} ${cs.borderTopStyle} ${cs.borderTopColor}`,
@@ -122,13 +109,31 @@
 
     // 自定义下拉列表
     const list = document.createElement('div');
-    list.style.cssText = 'position:absolute;left:0;top:100%;margin-top:4px;min-width:100%;'
+    list.style.cssText = 'position:absolute;'
       + 'background:#fff;border:1px solid #e4e7ed;border-radius:6px;'
       + 'box-shadow:0 4px 12px rgba(0,0,0,.12);max-height:260px;overflow-y:auto;'
       + 'z-index:9999;display:none;box-sizing:border-box;';
 
-    wrap.appendChild(input);
-    wrap.appendChild(list);
+    parent.appendChild(input);
+    parent.appendChild(list);
+
+    // 输入框/列表跟随 select 的位置与尺寸（窗口缩放、筛选栏重排都能跟上）
+    function place() {
+      const pr = parent.getBoundingClientRect();
+      const sr = sel.getBoundingClientRect();
+      input.style.left = `${sr.left - pr.left}px`;
+      input.style.top = `${sr.top - pr.top}px`;
+      input.style.width = `${sr.width}px`;
+      input.style.height = `${sr.height}px`;
+      list.style.left = `${sr.left - pr.left}px`;
+      list.style.top = `${sr.top - pr.top + sr.height + 4}px`;
+      list.style.minWidth = `${sr.width}px`;
+    }
+    place();
+    // 原生控件不再渲染（保留占位尺寸），避免其文字与箭头从输入框底下透出
+    sel.style.visibility = 'hidden';
+    try { new ResizeObserver(place).observe(sel); } catch (e) { /* 老浏览器忽略 */ }
+    window.addEventListener('resize', place);
 
     function select(opt) {
       sel.value = opt.value;
@@ -207,7 +212,7 @@
     scan();
     new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
     setInterval(scan, 2000);
-    log('v0.3.3 启动', location.href);
+    log('v0.3.4 启动', location.href);
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
