@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         linsms 通道模板-通道下拉模糊搜索
 // @namespace    https://github.com/815085226/Tampermonkey
-// @version      0.1.0
-// @description  adm.linsms.com/channel-templates 页面「通道」筛选下拉框支持输入模糊搜索：下拉框上叠加搜索输入框，输入即筛选选项，选中后同步回原生 select 并触发 change（Vue 照常响应）
+// @version      0.1.1
+// @description  adm.linsms.com 通道模板(channel-templates)/通道测试(channel-test) 页面「通道」筛选下拉框支持输入模糊搜索：下拉框上叠加搜索输入框，输入即筛选选项，选中后同步回原生 select 并触发 change（Vue 照常响应）
 // @match        http://adm.linsms.com/*
 // @match        https://adm.linsms.com/*
 // @run-at       document-idle
@@ -131,7 +131,7 @@
   }
 
   function scan() {
-    if (!/channel-templates/i.test(location.pathname)) return;
+    if (!/channel-templates|channel-test/i.test(location.pathname)) return;
     for (const sel of document.querySelectorAll('select')) {
       if (!sel.dataset[MARK] && isTargetSelect(sel)) enhance(sel);
     }
@@ -142,7 +142,7 @@
     scan();
     new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
     setInterval(scan, 2000);
-    log('v0.1.0 启动', location.href);
+    log('v0.1.1 启动', location.href);
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
