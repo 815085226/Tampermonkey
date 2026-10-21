@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 通道模板-通道下拉模糊搜索
 // @namespace    https://github.com/815085226/Tampermonkey
-// @version      0.3.2
+// @version      0.3.3
 // @description  adm.linsms.com 多页面筛选下拉框支持输入模糊搜索（channel-templates、channel-test、monitoring-reports、messages、submit-failures、send-progress、data-export、ban-terminations）：企业/企业用户/用户/产品/通道 下拉框上叠加搜索输入框，输入即筛选，选中后同步回原生 select 并触发 change（Vue 照常响应）
 // @match        http://adm.linsms.com/*
 // @match        https://adm.linsms.com/*
@@ -45,6 +45,17 @@
     return false;
   }
 
+  // 取元素实际不透明背景色（自身透明时沿祖先链向上找），避免底下原生控件透出造成重影
+  function resolveBg(el) {
+    let node = el;
+    while (node && node !== document.documentElement) {
+      const bg = getComputedStyle(node).backgroundColor;
+      if (bg && bg !== 'transparent' && !/rgba\(0,\s*0,\s*0,\s*0\)/.test(bg)) return bg;
+      node = node.parentElement;
+    }
+    return '#ffffff';
+  }
+
   function enhance(sel) {
     sel.dataset[MARK] = '1';
     log('增强通道下拉框');
@@ -58,6 +69,7 @@
     wrap.style.cssText = 'position:relative;box-sizing:border-box;'
       + `display:${cs.display === 'inline' ? 'inline-block' : cs.display};`
       + `width:${cs.width};`
+      + `height:${cs.height};`
       + `margin:${cs.marginTop} ${cs.marginRight} ${cs.marginBottom} ${cs.marginLeft};`;
     if (cs.flexGrow && cs.flexGrow !== '0') {
       wrap.style.flex = `${cs.flexGrow} ${cs.flexShrink} ${cs.flexBasis}`;
@@ -66,6 +78,8 @@
     sel.parentNode.insertBefore(wrap, sel);
     wrap.appendChild(sel);
     sel.style.width = '100%';
+    // 原生控件不再渲染（保留占位尺寸），避免其文字与箭头从输入框底下透出
+    sel.style.visibility = 'hidden';
 
     const firstText = sel.options[0] ? (sel.options[0].textContent || '').trim() : '';
     const isAllPlaceholder = /^(全部|请选择)/.test(firstText);
@@ -79,7 +93,7 @@
     input.style.cssText = [
       'position:absolute', 'left:0', 'top:0', 'width:100%', 'height:100%',
       'appearance:none', '-webkit-appearance:none',
-      `background-color:${cs.backgroundColor}`,
+      `background-color:${resolveBg(sel)}`,
       `border:${cs.borderTopWidth} ${cs.borderTopStyle} ${cs.borderTopColor}`,
       `border-radius:${cs.borderTopLeftRadius}`,
       `box-shadow:${cs.boxShadow}`,
@@ -193,7 +207,7 @@
     scan();
     new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
     setInterval(scan, 2000);
-    log('v0.3.2 启动', location.href);
+    log('v0.3.3 启动', location.href);
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
