@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linsms 通道模板-通道下拉模糊搜索
 // @namespace    https://github.com/815085226/Tampermonkey
-// @version      0.3.0
+// @version      0.3.1
 // @description  adm.linsms.com 多页面筛选下拉框支持输入模糊搜索（channel-templates、channel-test、monitoring-reports、messages、submit-failures、send-progress、data-export、ban-terminations）：企业/企业用户/用户/产品/通道 下拉框上叠加搜索输入框，输入即筛选，选中后同步回原生 select 并触发 change（Vue 照常响应）
 // @match        http://adm.linsms.com/*
 // @match        https://adm.linsms.com/*
@@ -49,24 +49,33 @@
     sel.dataset[MARK] = '1';
     log('增强通道下拉框');
 
-    // 包一层便于绝对定位（输入框覆盖 select、列表挂在下方）
+    const cs = getComputedStyle(sel);
+
+    // 包一层便于绝对定位（输入框覆盖 select、列表挂在下方）。
+    // 关键：wrapper 必须完整继承 select 的布局角色（宽度/margin/flex 等），
+    // 否则 select 脱离父级拉伸上下文会导致筛选栏排版变形
     const wrap = document.createElement('div');
-    wrap.style.cssText = 'position:relative;display:inline-block;';
+    wrap.style.cssText = 'position:relative;box-sizing:border-box;'
+      + `display:${cs.display === 'inline' ? 'inline-block' : cs.display};`
+      + `width:${cs.width};`
+      + `margin:${cs.marginTop} ${cs.marginRight} ${cs.marginBottom} ${cs.marginLeft};`;
+    if (cs.flexGrow && cs.flexGrow !== '0') {
+      wrap.style.flex = `${cs.flexGrow} ${cs.flexShrink} ${cs.flexBasis}`;
+    }
+    if (cs.alignSelf && cs.alignSelf !== 'auto') wrap.style.alignSelf = cs.alignSelf;
     sel.parentNode.insertBefore(wrap, sel);
     wrap.appendChild(sel);
-
-    const cs = getComputedStyle(sel);
+    sel.style.width = '100%';
 
     const firstText = sel.options[0] ? (sel.options[0].textContent || '').trim() : '';
     const isAllPlaceholder = /^(全部|请选择)/.test(firstText);
 
-    // 覆盖在 select 上的搜索输入框（不透明背景盖住原生框）
+    // 覆盖在 select 上的搜索输入框（不透明背景盖住原生框，铺满 wrapper）
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = firstText ? `${firstText}（可输入搜索）` : '可输入搜索';
     input.style.cssText = [
-      'position:absolute', 'left:0', 'top:0',
-      `width:${sel.offsetWidth}px`, `height:${sel.offsetHeight}px`,
+      'position:absolute', 'left:0', 'top:0', 'width:100%', 'height:100%',
       `border:${cs.borderTopWidth} ${cs.borderTopStyle} ${cs.borderTopColor}`,
       `border-radius:${cs.borderTopLeftRadius}`,
       `font:${cs.font}`,
@@ -74,12 +83,14 @@
       'box-sizing:border-box', 'color:#606266', 'cursor:text',
     ].join(';');
     const syncInput = () => {
+      const ft = sel.options[0] ? (sel.options[0].textContent || '').trim() : '';
+      const allPh = /^(全部|请选择)/.test(ft);
       const cur = sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex] : null;
       const curText = cur ? (cur.textContent || '').trim() : '';
-      if (isAllPlaceholder && sel.selectedIndex <= 0) {
+      if (allPh && sel.selectedIndex <= 0) {
         // 未选中具体项：显示为灰色占位，不用手动删字
         input.value = '';
-        input.placeholder = `${firstText}（可输入搜索）`;
+        input.placeholder = ft ? `${ft}（可输入搜索）` : '可输入搜索';
       } else {
         input.value = curText;
       }
@@ -173,7 +184,7 @@
     scan();
     new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
     setInterval(scan, 2000);
-    log('v0.3.0 启动', location.href);
+    log('v0.3.1 启动', location.href);
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
