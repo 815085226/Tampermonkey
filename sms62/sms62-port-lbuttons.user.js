@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.8.5
+// @version      1.9.0
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -48,6 +48,10 @@
     if (AUTH && !/^Bearer\s/i.test(AUTH)) AUTH = 'Bearer ' + AUTH;
   } catch (e) { /* ignore */ }
 
+  // 站点发生写操作（推送/改状态/充值等非 GET 接口调用）后，报表缓存即视为不新鲜
+  let CACHE_DIRTY = false;
+  function markCacheDirty() { CACHE_DIRTY = true; }
+
   const _fetch = window.fetch;
   window.fetch = function (input, init) {
     try {
@@ -58,6 +62,12 @@
       );
       const a = headers.get('Authorization');
       if (a) AUTH = a;
+
+      const method = String(
+        (init && init.method) || (input && input.method) || 'GET'
+      ).toUpperCase();
+      const url = typeof input === 'string' ? input : String((input && input.url) || '');
+      if (method !== 'GET' && /\/prod-api\//.test(url)) markCacheDirty();
     } catch (e) { /* ignore */ }
     return _fetch.apply(this, arguments);
   };
@@ -65,6 +75,23 @@
   XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
     if (String(k).toLowerCase() === 'authorization') AUTH = v;
     return _setReqHeader.apply(this, arguments);
+  };
+  const _xopen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (m, u) {
+    this.__gavinMethod = String(m || 'GET').toUpperCase();
+    this.__gavinUrl = String(u || '');
+    return _xopen.apply(this, arguments);
+  };
+  const _xsend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function () {
+    if (
+      this.__gavinMethod &&
+      this.__gavinMethod !== 'GET' &&
+      /\/prod-api\//.test(this.__gavinUrl || '')
+    ) {
+      markCacheDirty();
+    }
+    return _xsend.apply(this, arguments);
   };
 
   // ===== 从 /mkt/config 的业务配置接口拉取 LOCATION:DEVICES:CONFIG =====
@@ -151,14 +178,23 @@
   }
 
   // 拉全量端口数据：先取第 1 页拿 total，剩余页并行请求（比串行快数倍）
-  const REPORT_CACHE_KEY = 'gavin-lreport-cache-v1';
-  const REPORT_CACHE_TTL = 5 * 60 * 1000; // 缓存 5 分钟
+  const REPORT_CACHE_KEY = 'gavin-lreport-cache-v2'; // v2：新增 pkgs 字段，旧结构缓存自动作废
+  const REPORT_CACHE_TTL = 30 * 60 * 1000; // 缓存最长可用 30 分钟（超过直接丢弃）
+  const REPORT_FRESH_TTL = 30 * 1000;      // 新鲜期：30 秒内直接用、不再请求
   let reportDataPromise = null; // 进行中的拉取请求（防重复）
+  let lastDataTs = 0;           // 当前展示数据的实际抓取时间
+  let reportRefreshing = false; // 报表刷新中（防并发重复请求）
 
   function readCache() {
     try {
       const c = JSON.parse(sessionStorage.getItem(REPORT_CACHE_KEY) || 'null');
-      if (c && Date.now() - c.ts < REPORT_CACHE_TTL && Array.isArray(c.rows)) return c;
+      if (!c || !Array.isArray(c.rows) || !c.rows.length) return null;
+      if (typeof c.ts !== 'number' || Date.now() - c.ts >= REPORT_CACHE_TTL) {
+        sessionStorage.removeItem(REPORT_CACHE_KEY); // 过期太久，清掉
+        return null;
+      }
+      if (!('p' in c.rows[0])) return null; // 旧结构（无套餐字段）视为无效
+      return c;
     } catch (e) { /* 缓存损坏则忽略 */ }
     return null;
   }
@@ -208,6 +244,8 @@
         for (const j of rest) rows.push(...(j.rows || j.data?.rows || []));
       }
       writeCache(rows);
+      CACHE_DIRTY = false; // 已拿到最新数据，失效标记复位
+      lastDataTs = Date.now();
       return rows;
     })();
 
@@ -417,7 +455,9 @@
     const foot = document.createElement('div');
     foot.style.cssText = 'margin-top:8px;font-size:12px;color:#909399;';
     foot.textContent =
-      '统计范围: 全部端口数据（设备归属按业务配置 ' + CONFIG_KEY + ' 划分）；点击状态标签可反向筛选列表，点「刷新报表」更新数据';
+      '统计范围: 全部端口数据（设备归属按业务配置 ' + CONFIG_KEY + ' 划分）' +
+      (lastDataTs ? ' · 数据时间 ' + fmtTime(lastDataTs) : '') +
+      '；点击状态标签可反向筛选列表，点「刷新报表」强制拉最新';
     wrap.appendChild(foot);
     return wrap;
   }
@@ -428,26 +468,85 @@
     if (!body || !lastRows.length) return; // 数据还没拉到时等首次加载
     body.innerHTML = '';
     body.appendChild(buildReportTable(buildStats(lastRows)));
+    updateTimeLabel();
   }
 
-  async function refreshReport(force) {
+  function fmtTime(ts) {
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, '0');
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  // 头部「数据 19:07:23（12 秒前）」标签
+  function updateTimeLabel() {
+    const el = document.getElementById(REPORT_ID + '-time');
+    if (!el) return;
+    if (!lastDataTs) { el.textContent = '数据 --:--:--'; return; }
+    const age = Math.max(0, Math.round((Date.now() - lastDataTs) / 1000));
+    el.textContent = '数据 ' + fmtTime(lastDataTs) + (age >= 5 ? '（' + age + ' 秒前）' : '');
+    el.title = '报表数据抓取时间：' + new Date(lastDataTs).toLocaleString();
+  }
+
+  function setRefreshingUI(on) {
+    const el = document.getElementById(REPORT_ID + '-updating');
+    if (el) el.style.display = on ? 'inline' : 'none';
+  }
+
+  // 渲染一批数据（rows 可能是缓存精简行，也可能是接口原始行）
+  function renderReportRows(rows) {
     const body = document.getElementById(REPORT_ID + '-body');
     const tip = document.getElementById(REPORT_ID + '-tip');
     if (!body) return;
+    lastRows = rows;
+    body.innerHTML = '';
+    body.appendChild(buildReportTable(buildStats(rows)));
+    if (tip) tip.style.display = 'none';
+    updateTimeLabel();
+  }
+
+  // 策略：缓存命中先用缓存秒开；数据不够新（>30 秒或站点刚发生过写操作）再后台静默更新
+  async function refreshReport(force) {
+    if (reportRefreshing) return;
+    if (!document.getElementById(REPORT_ID + '-body')) return; // 面板不在（非端口页）
+    reportRefreshing = true;
+    const tip = document.getElementById(REPORT_ID + '-tip');
     try {
-      tip.textContent = '加载中…';
-      tip.style.display = 'block';
+      const cached = force ? null : readCache();
+
+      if (cached) {
+        lastDataTs = cached.ts;
+        renderReportRows(cached.rows); // 秒开：完全不发请求
+        const age = Date.now() - cached.ts;
+        const fresh = age < REPORT_FRESH_TTL && !CACHE_DIRTY;
+        if (fresh) {
+          log('报表使用本地缓存（' + Math.round(age / 1000) + ' 秒前），足够新不请求');
+          return;
+        }
+        setRefreshingUI(true); // 先展示旧数据 + “更新中”，避免等待空白
+        log('报表先用缓存渲染（' + Math.round(age / 1000) + ' 秒前' +
+          (CACHE_DIRTY ? '，站点已有写操作' : '') + '），后台静默更新中…');
+      } else {
+        if (tip) {
+          tip.textContent = '加载中…';
+          tip.style.display = 'block';
+        }
+        setRefreshingUI(true);
+      }
+
       if (!Object.keys(statusDict).length) await loadStatusDict();
-      const rows = await fetchAllPorts(force);
-      lastRows = rows;
-      const stats = buildStats(rows);
-      body.innerHTML = '';
-      body.appendChild(buildReportTable(stats));
-      tip.style.display = 'none';
-      log('✅ L 组报表已刷新（共 ' + rows.length + ' 条端口数据）');
+      const rows = await fetchAllPorts(true); // 强制走网络
+      renderReportRows(rows);
+      log('✅ L 组报表已更新（共 ' + rows.length + ' 条端口数据）');
     } catch (e) {
-      tip.textContent = '报表加载失败: ' + (e && e.message);
+      if (tip && !lastRows.length) {
+        tip.textContent = '报表加载失败: ' + (e && e.message);
+        tip.style.display = 'block';
+      }
       log('报表加载失败:', e);
+    } finally {
+      reportRefreshing = false;
+      setRefreshingUI(false);
+      updateTimeLabel();
     }
   }
 
@@ -471,6 +570,21 @@
 
     const ops = document.createElement('div');
     ops.style.cssText = 'display:flex;align-items:center;gap:8px;';
+
+    // 数据时间标签：让「新/旧」一眼可见
+    const timeSpan = document.createElement('span');
+    timeSpan.id = REPORT_ID + '-time';
+    timeSpan.style.cssText = 'font-size:12px;color:#909399;white-space:nowrap;';
+    timeSpan.textContent = '数据 --:--:--';
+    ops.appendChild(timeSpan);
+
+    // 「更新中…」提示（后台静默更新时显示，不阻塞阅读）
+    const updSpan = document.createElement('span');
+    updSpan.id = REPORT_ID + '-updating';
+    updSpan.style.cssText =
+      'display:none;font-size:12px;color:#e6a23c;white-space:nowrap;';
+    updSpan.textContent = '更新中…';
+    ops.appendChild(updSpan);
 
     // 阈值输入：调整"发送总数>N"的 N，改动后用本地数据即时重算（不发请求）
     const thLabel = document.createElement('span');
@@ -1002,6 +1116,10 @@
       batchRunning = false;
       busy = false;
       setTimeout(removeBatchProgress, 4000);
+      // 批量改过端口状态，报表立刻重算一次（不强求，失败静默）
+      if (document.getElementById(REPORT_ID)) {
+        setTimeout(() => refreshReport(true), 800);
+      }
     }
   }
 
@@ -1131,6 +1249,20 @@
   setInterval(tryInsert, 1500);
   setInterval(tryInsertReport, 1500);
 
+  // 后台保鲜：每 60 秒静默更新一次（先渲染缓存、再拉最新，不打断阅读）
+  setInterval(() => {
+    if (document.hidden) return;
+    if (!document.getElementById(REPORT_ID)) return;
+    refreshReport();
+  }, 60 * 1000);
+
+  // 从后台标签页切回来时立即补一次
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    if (!document.getElementById(REPORT_ID)) return;
+    refreshReport();
+  });
+
   // run-at document-start 时 body 可能还不存在，就绪后再挂观察器
   function start() {
     new MutationObserver(() => {
@@ -1153,5 +1285,5 @@
     start();
   }
 
-  log('v1.8.5 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.9.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
