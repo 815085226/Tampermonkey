@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.9.1
+// @version      1.9.2
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -397,8 +397,18 @@
       }
 
       const tdName = document.createElement('td');
-      tdName.style.cssText = 'border:1px solid #ebeef5;padding:8px 12px;font-weight:600;';
-      tdName.textContent = s.name;
+      tdName.style.cssText =
+        'border:1px solid #ebeef5;padding:8px 12px;font-weight:600;' +
+        'white-space:nowrap;line-height:1.5;';
+      // 组名（加粗）+ 该组对应的设备配置（灰色小字）
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = s.name;
+      tdName.appendChild(nameSpan);
+      const devSpan = document.createElement('span');
+      devSpan.style.cssText =
+        'margin-left:6px;font-weight:400;font-size:12px;color:#909399;';
+      devSpan.textContent = '(' + s.devices.join('、') + ')';
+      tdName.appendChild(devSpan);
       const tdTotal = document.createElement('td');
       tdTotal.style.cssText = 'border:1px solid #ebeef5;padding:8px 12px;';
       tdTotal.textContent = s.total;
@@ -1326,5 +1336,5 @@
     start();
   }
 
-  log('v1.9.1 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.9.2 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
