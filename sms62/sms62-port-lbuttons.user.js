@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.9.0
+// @version      1.9.1
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -256,15 +256,52 @@
     }
   }
 
-  async function loadStatusDict() {
+  // 状态字典：缓存到 sessionStorage，保证缓存秒开时状态文本也能立刻显示
+  const STATUS_DICT_CACHE_KEY = 'gavin-sdict-cache-v1';
+  const STATUS_DICT_TTL = 24 * 60 * 60 * 1000; // 字典几乎不变，缓存 1 天
+
+  function readDictCache() {
     try {
-      const json = await apiGet(STATUS_DICT_API);
-      const list = json.data || [];
-      statusDict = {};
-      for (const d of list) statusDict[String(d.dictValue)] = d.dictLabel;
-    } catch (e) {
-      log('状态字典拉取失败，报表将直接显示状态原始值');
+      const c = JSON.parse(sessionStorage.getItem(STATUS_DICT_CACHE_KEY) || 'null');
+      if (c && c.map && Object.keys(c.map).length && Date.now() - c.ts < STATUS_DICT_TTL) {
+        return c.map;
+      }
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
+  async function loadStatusDict(force) {
+    if (!force) {
+      const cachedDict = readDictCache();
+      if (cachedDict) { statusDict = cachedDict; return statusDict; }
     }
+    for (let i = 0; i < 3; i++) {
+      try {
+        const json = await apiGet(STATUS_DICT_API);
+        const list = (json && json.data) || [];
+        if (!list.length) throw new Error('字典为空');
+        const map = {};
+        for (const d of list) map[String(d.dictValue)] = d.dictLabel;
+        statusDict = map;
+        try {
+          sessionStorage.setItem(
+            STATUS_DICT_CACHE_KEY,
+            JSON.stringify({ ts: Date.now(), map })
+          );
+        } catch (e) { /* 存不下就算了 */ }
+        return statusDict;
+      } catch (e) {
+        if (i === 2) log('状态字典拉取失败，报表将显示状态原始值:', e && e.message);
+        else await sleep(800);
+      }
+    }
+    return statusDict;
+  }
+
+  // 确保状态字典就绪（有本地缓存时零等待）
+  async function ensureStatusDict() {
+    if (Object.keys(statusDict).length) return statusDict;
+    return loadStatusDict();
   }
 
   const statusLabel = (v) => statusDict[String(v)] || String(v ?? '未知');
@@ -511,6 +548,11 @@
     reportRefreshing = true;
     const tip = document.getElementById(REPORT_ID + '-tip');
     try {
+      // 先保证状态字典可用（有 sessionStorage 缓存时零等待），否则缓存秒开会把状态显示成数字
+      // 手动点「刷新报表」时顺带强制更新字典，避免新增状态名一直显示成数字
+      if (force) await loadStatusDict(true);
+      else await ensureStatusDict();
+
       const cached = force ? null : readCache();
 
       if (cached) {
@@ -533,7 +575,6 @@
         setRefreshingUI(true);
       }
 
-      if (!Object.keys(statusDict).length) await loadStatusDict();
       const rows = await fetchAllPorts(true); // 强制走网络
       renderReportRows(rows);
       log('✅ L 组报表已更新（共 ' + rows.length + ' 条端口数据）');
@@ -1285,5 +1326,5 @@
     start();
   }
 
-  log('v1.9.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.9.1 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
