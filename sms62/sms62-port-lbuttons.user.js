@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.10.0
+// @version      1.10.1
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（套餐<1000 数量 + 发不出去数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -311,13 +311,12 @@
   // ===== 「发不出去」判定 =====
   // 条件（全部满足）：
   //   1) 状态标签含「封卡」
-  //   2) 发送总数 > CANT_SEND_MIN_TOTAL
-  //   3) 充值次数(topupCount) >= CANT_SEND_MIN_TOPUP（即 >1）
-  //   4) 失败数量(recentSendFailCount) >= 有效发送数
-  //      有效发送数 = 发送总数 - (充值次数-1) * PACKAGE_UNIT，且需 > 0
-  const CANT_SEND_MIN_TOTAL = 1500; // 发送总数下限（不含）
-  const CANT_SEND_MIN_TOPUP = 2;    // 充值次数下限（含），即「充值次数 > 1」
-  const PACKAGE_UNIT = 1500;        // 每次充值对应的发送额度
+  //   2) 充值次数(topupCount) >= CANT_SEND_MIN_TOPUP（即 >= 1）
+  //   3) 失败数量(recentSendFailCount) >= 有效发送数，且有效发送数需 > 0
+  //      有效发送数 = 充值次数 > 1 ? 发送总数 - (充值次数-1) * PACKAGE_UNIT
+  //                                : 发送总数（不扣减）
+  const CANT_SEND_MIN_TOPUP = 1; // 充值次数下限（含），即「充值次数 >= 1」
+  const PACKAGE_UNIT = 1500;     // 每次充值对应的发送额度（充值次数 >1 时按 (N-1) 扣减）
 
   function isCantSend(row) {
     const totalSend = Number(row.t ?? row.totalSend) || 0;
@@ -325,9 +324,10 @@
     const fail = Number(row.f ?? row.recentSendFailCount) || 0;
     const label = statusLabel(row.s ?? row.status);
     if (!label.includes('封卡')) return false;            // 1) 封卡类状态
-    if (totalSend <= CANT_SEND_MIN_TOTAL) return false;   // 2) 发送总数 > 1500
-    if (topup < CANT_SEND_MIN_TOPUP) return false;        // 3) 充值次数 > 1
-    const effective = totalSend - (topup - 1) * PACKAGE_UNIT; // 4) 有效发送数
+    if (topup < CANT_SEND_MIN_TOPUP) return false;        // 2) 充值次数 >= 1
+    // 3) 有效发送数：仅当充值次数 > 1 时扣减充值带来的额度
+    const effective =
+      topup > 1 ? totalSend - (topup - 1) * PACKAGE_UNIT : totalSend;
     if (effective <= 0) return false;
     return fail >= effective;
   }
@@ -456,16 +456,16 @@
       tdOver.textContent = s.lowPkg;
       tdOver.title = '套餐 < ' + pkgThreshold + ' 的端口数量';
 
-      // 发不出去：封卡状态 + 发送总数>1500 + 充值次数>1 + 失败数量>=有效发送数
+      // 发不出去：封卡状态 + 充值次数>=1 + 失败数量>=有效发送数
       const tdCant = document.createElement('td');
       tdCant.style.cssText =
         'border:1px solid #ebeef5;padding:8px 12px;' +
         (s.cantSend > 0 ? 'color:#f56c6c;font-weight:600;' : 'color:#909399;');
       tdCant.textContent = s.cantSend;
       tdCant.title =
-        '发不出去判定：状态含「封卡」且 发送总数>' + CANT_SEND_MIN_TOTAL +
-        ' 且 充值次数>' + (CANT_SEND_MIN_TOPUP - 1) +
-        ' 且 失败数量 >= 发送总数-(充值次数-1)×' + PACKAGE_UNIT;
+        '发不出去判定：状态含「封卡」且 充值次数≥' + CANT_SEND_MIN_TOPUP +
+        ' 且 失败数量 ≥ 有效发送数（有效发送数 = 充值次数>1 ? ' +
+        '发送总数-(充值次数-1)×' + PACKAGE_UNIT + ' : 发送总数）';
 
       tr.appendChild(tdName);
       tr.appendChild(tdTotal);
@@ -559,9 +559,9 @@
     foot.textContent =
       '统计范围: 全部端口数据（设备归属按业务配置 ' + CONFIG_KEY + ' 划分）' +
       (lastDataTs ? ' · 数据时间 ' + fmtTime(lastDataTs) : '') +
-      '；「发不出去」= 封卡类状态 + 发送总数>' + CANT_SEND_MIN_TOTAL +
-      ' + 充值次数>' + (CANT_SEND_MIN_TOPUP - 1) +
-      ' + 失败数量≥发送总数-(充值次数-1)×' + PACKAGE_UNIT +
+      '；「发不出去」= 封卡类状态 + 充值次数≥' + CANT_SEND_MIN_TOPUP +
+      ' + 失败数量≥有效发送数（有效发送数 = 充值次数>1 ? 发送总数-(充值次数-1)×' +
+      PACKAGE_UNIT + ' : 发送总数）' +
       '；点击状态标签可反向筛选列表，点「刷新报表」强制拉最新';
     wrap.appendChild(foot);
     return wrap;
@@ -612,15 +612,20 @@
     // 诊断：没有命中「发不出去」时，打印数据里实际存在的封卡类状态，便于核对口径
     if (!stats.some((s) => s.cantSend > 0)) {
       const labels = {};
+      let sealed = 0;
+      let sealedTopupOk = 0;
       for (const r of rows) {
         const lb = statusLabel(r.s ?? r.status);
-        if (lb.includes('封卡')) labels[lb] = (labels[lb] || 0) + 1;
+        if (!lb.includes('封卡')) continue;
+        labels[lb] = (labels[lb] || 0) + 1;
+        sealed++;
+        if ((Number(r.n ?? r.topupCount) || 0) >= CANT_SEND_MIN_TOPUP) sealedTopupOk++;
       }
       log('「发不出去」当前命中 0 张；数据中的封卡类状态: ' +
         (Object.keys(labels).length ? JSON.stringify(labels) : '无') +
-        '（判定还要求 发送总数>' + CANT_SEND_MIN_TOTAL +
-        ' 且 充值次数>' + (CANT_SEND_MIN_TOPUP - 1) +
-        ' 且 失败数量>=发送总数-(充值次数-1)×' + PACKAGE_UNIT + '）');
+        '（封卡 ' + sealed + ' 张，其中充值次数≥' + CANT_SEND_MIN_TOPUP +
+        ' 的 ' + sealedTopupOk + ' 张；判定还要求 失败数量≥有效发送数，' +
+        '有效发送数 = 充值次数>1 ? 发送总数-(充值次数-1)×' + PACKAGE_UNIT + ' : 发送总数）');
     }
   }
 
@@ -1494,5 +1499,5 @@
     start();
   }
 
-  log('v1.10.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.10.1 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
