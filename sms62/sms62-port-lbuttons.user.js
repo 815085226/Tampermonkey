@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.10.1
+// @version      1.10.2
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（套餐<1000 数量 + 发不出去数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -562,6 +562,8 @@
       '；「发不出去」= 封卡类状态 + 充值次数≥' + CANT_SEND_MIN_TOPUP +
       ' + 失败数量≥有效发送数（有效发送数 = 充值次数>1 ? 发送总数-(充值次数-1)×' +
       PACKAGE_UNIT + ' : 发送总数）' +
+      '；「换卡推送」批量流程的勾选条件 = 套餐＜' + pkgThreshold +
+      '（跟随上方输入框）' +
       '；点击状态标签可反向筛选列表，点「刷新报表」强制拉最新';
     wrap.appendChild(foot);
     return wrap;
@@ -724,7 +726,7 @@
     thInput.min = '0';
     thInput.step = '1';
     thInput.value = pkgThreshold;
-    thInput.title = '调整套餐阈值后立即重新统计';
+    thInput.title = '调整套餐阈值后立即重新统计；「换卡推送」批量流程的勾选条件也跟随此值';
     thInput.style.cssText =
       'width:76px;padding:3px 6px;font-size:12px;border:1px solid #dcdfe6;' +
       'border-radius:4px;color:#606266;outline:none;';
@@ -735,7 +737,9 @@
       pkgThreshold = v;
       title.textContent = titleText();
       rebuildReportTable(); // 用已拉取的数据重算，无需重新请求
-      log('阈值已调整为 套餐<' + pkgThreshold + '，报表已重新统计');
+      refreshBatchMenuTitles(); // 批量推送菜单提示同步新阈值
+      log('阈值已调整为 套餐<' + pkgThreshold + '，报表已重新统计；' +
+        '「换卡推送」批量流程同步使用该阈值');
     };
     thInput.addEventListener('change', applyThreshold);
     thInput.addEventListener('keydown', (e) => {
@@ -980,7 +984,7 @@
   }
 
   // ===== 批量推送（换卡）：hover L 按钮下拉触发 =====
-  // 批量条件：设备 = 单台 → 清空「发送总数」→ 查询 → 只勾选「套餐 < BATCH_PKG_LIMIT」的行
+  // 批量条件：设备 = 单台 → 清空「发送总数」→ 查询 → 只勾选「套餐 < 报表阈值」的行
   // 菜单项 → 弹窗里「推送类型」选项的映射
   const MENU_PUSH_TYPE = {
     '换卡': '换卡',
@@ -1058,7 +1062,22 @@
   }
 
   // ===== 按「套餐 < N」筛选并勾选行（页面筛选栏没有套餐条件，只能逐行判断）=====
-  const BATCH_PKG_LIMIT = 1000; // 批量换卡推送使用的套餐阈值：套餐 < 1000 才推送
+  // 批量的套餐阈值跟随报表头部「套餐＜N」输入框（pkgThreshold，默认 1000），不再单独写死
+  function batchPkgLimit() {
+    return pkgThreshold;
+  }
+
+  // 菜单里的阈值提示随输入框变化（按钮条重建时会重新生成，这里只处理阈值改动的情况）
+  function refreshBatchMenuTitles() {
+    const limit = batchPkgLimit();
+    for (const el of document.querySelectorAll('[data-gavin-batch-menu="1"]')) {
+      el.title =
+        '逐台设备: 筛选设备 → 查询 → 只勾选「套餐<' + limit +
+        '」的端口 → 推送（' + (MENU_PUSH_TYPE[el.dataset.gavinBatchItem] || '') +
+        '）→ 等人工确认（阈值跟随报表头部输入框）';
+      el.dataset.gavinBatchLimit = String(limit);
+    }
+  }
 
   // 清空「发送总数」条件，避免上一轮残留的 limit/规则影响结果
   function clearSendTotalCondition() {
@@ -1247,6 +1266,7 @@
     const devices = GROUPS_CURRENT[groupName];
     if (!devices || !devices.length) { log('L 组 ' + groupName + ' 无设备'); return; }
     const pushType = MENU_PUSH_TYPE[menuItem] || menuItem;
+    const pkgLimit = batchPkgLimit(); // 本次批量使用的套餐阈值（开始时的快照）
 
     batchRunning = true;
     busy = true; // 批量期间禁用其他快选操作
@@ -1254,7 +1274,7 @@
     const prog = batchProgress();
     try {
       log('🚀 开始批量' + menuItem + '推送：L ' + groupName + '（' +
-        devices.length + ' 台设备，套餐<' + BATCH_PKG_LIMIT + '）');
+        devices.length + ' 台设备，套餐<' + pkgLimit + '，阈值取自报表头部输入框）');
       for (let i = 0; i < devices.length; i++) {
         if (batchStopFlag) {
           log('🛑 批量任务已终止，剩余 ' + (devices.length - i) + ' 台设备未处理');
@@ -1279,13 +1299,13 @@
           break;
         }
 
-        // 3.5) 只勾选「套餐 < BATCH_PKG_LIMIT」的行（推送按钮要求先选中行）
+        // 3.5) 只勾选「套餐 < pkgLimit」的行（推送按钮要求先选中行）
         prog('📋 批量' + menuItem + '（' + groupName + '）' +
           (i + 1) + '/' + devices.length + ' — 设备 ' + dev +
-          '：勾选「套餐<' + BATCH_PKG_LIMIT + '」的端口…');
-        const selected = await selectRowsByPkg(BATCH_PKG_LIMIT);
+          '：勾选「套餐<' + pkgLimit + '」的端口…');
+        const selected = await selectRowsByPkg(pkgLimit);
         if (!selected) {
-          log('ℹ️ 设备 ' + dev + ': 无「套餐<' + BATCH_PKG_LIMIT +
+          log('ℹ️ 设备 ' + dev + ': 无「套餐<' + pkgLimit +
             '」的端口，跳过');
           continue;
         }
@@ -1388,7 +1408,11 @@
     for (const item of ['换卡']) {
       const mi = document.createElement('div');
       mi.textContent = item + '推送';
-      mi.title = '逐台设备: 筛选设备 → 查询 → 只勾选「套餐<' + BATCH_PKG_LIMIT + '」的端口 → 推送（' + (MENU_PUSH_TYPE[item] || item) + '）→ 等人工确认';
+      mi.dataset.gavinBatchMenu = '1';
+      mi.dataset.gavinBatchItem = item;
+      mi.title = '逐台设备: 筛选设备 → 查询 → 只勾选「套餐<' + batchPkgLimit() +
+        '」的端口 → 推送（' + (MENU_PUSH_TYPE[item] || item) +
+        '）→ 等人工确认（阈值跟随报表头部输入框）';
       mi.style.cssText =
         'padding:6px 14px;font-size:12px;color:#606266;cursor:pointer;white-space:nowrap;';
       mi.addEventListener('mouseenter', () => {
@@ -1499,5 +1523,5 @@
     start();
   }
 
-  log('v1.10.1 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.10.2 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
