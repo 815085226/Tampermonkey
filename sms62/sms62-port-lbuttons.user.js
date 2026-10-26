@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.10.3
+// @version      1.11.0
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（套餐<1000 数量 + 发不出去数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -336,18 +336,24 @@
   const CANT_SEND_MIN_TOPUP = 1; // 充值次数下限（含），即「充值次数 >= 1」
   const PACKAGE_UNIT = 1500;     // 每次充值对应的发送额度（充值次数 >1 时按 (N-1) 扣减）
 
-  function isCantSend(row) {
-    const totalSend = Number(row.t ?? row.totalSend) || 0;
-    const topup = Number(row.n ?? row.topupCount) || 0;
-    const fail = Number(row.f ?? row.recentSendFailCount) || 0;
-    const label = statusLabel(row.s ?? row.status);
-    if (!label.includes('封卡')) return false;            // 1) 封卡类状态
-    if (topup < CANT_SEND_MIN_TOPUP) return false;        // 2) 充值次数 >= 1
+  // 纯判定（报表统计与表格逐行勾选共用）：statusText 为状态中文标签
+  function cantSendHit(totalSend, topup, fail, statusText) {
+    if (!String(statusText || '').includes('封卡')) return false; // 1) 封卡类状态
+    if (!(topup >= CANT_SEND_MIN_TOPUP)) return false;            // 2) 充值次数 >= 1
     // 3) 有效发送数：仅当充值次数 > 1 时扣减充值带来的额度
     const effective =
       topup > 1 ? totalSend - (topup - 1) * PACKAGE_UNIT : totalSend;
-    if (effective <= 0) return false;
+    if (!(effective > 0)) return false;
     return fail >= effective;
+  }
+
+  function isCantSend(row) {
+    return cantSendHit(
+      Number(row.t ?? row.totalSend) || 0,
+      Number(row.n ?? row.topupCount) || 0,
+      Number(row.f ?? row.recentSendFailCount) || 0,
+      statusLabel(row.s ?? row.status)
+    );
   }
 
   function buildStats(rows) {
@@ -770,6 +776,27 @@
     ops.appendChild(thLabel);
     ops.appendChild(thInput);
 
+    // 「发不出去筛选」：状态=封卡类 → 查询 → 勾选满足规则的行
+    const cantBtn = document.createElement('button');
+    cantBtn.type = 'button';
+    cantBtn.id = REPORT_ID + '-cantsend';
+    cantBtn.textContent = '发不出去筛选';
+    cantBtn.title = '清空设备筛选 → 状态设为「' + SEALED_STATUS_LABEL +
+      '」（含其他封卡类状态）→ 查询 → 勾选满足「发不出去」规则的行' +
+      '（封卡类状态 + 充值次数≥' + CANT_SEND_MIN_TOPUP + ' + 失败数量≥有效发送数）';
+    cantBtn.style.cssText =
+      'padding:4px 12px;font-size:12px;border:1px solid #f5c6cb;border-radius:4px;' +
+      'background:#fef0f0;color:#f56c6c;cursor:pointer;white-space:nowrap;';
+    cantBtn.addEventListener('mouseenter', () => {
+      if (!cantBtn.disabled) cantBtn.style.background = '#fde2e2';
+    });
+    cantBtn.addEventListener('mouseleave', () => { cantBtn.style.background = '#fef0f0'; });
+    cantBtn.addEventListener('click', (e) => {
+      e.stopPropagation(); // 不触发折叠
+      runCantSendFilter();
+    });
+    ops.appendChild(cantBtn);
+
     const refreshBtn = document.createElement('button');
     refreshBtn.type = 'button';
     refreshBtn.textContent = '刷新报表';
@@ -1112,11 +1139,17 @@
 
   // 「套餐」列在表格中的下标（表头与 tbody 的 td 顺序一致）
   function findPkgColumnIndex() {
+    return findColumnIndex(['套餐']);
+  }
+
+  // 按表头文本找列下标：先精确匹配，退化为包含匹配
+  function findColumnIndex(names) {
     const heads = [...document.querySelectorAll('.el-table__header-wrapper thead th')];
-    for (let i = 0; i < heads.length; i++) {
-      if ((heads[i].innerText || '').replace(/\s+/g, '') === '套餐') return i;
-    }
-    return -1;
+    const texts = heads.map((th) => (th.innerText || '').replace(/\s+/g, ''));
+    let i = texts.findIndex((t) => names.includes(t));
+    if (i >= 0) return i;
+    i = texts.findIndex((t) => names.some((n) => t.includes(n)));
+    return i;
   }
 
   function currentQueryRows() {
@@ -1182,6 +1215,119 @@
     log('按「套餐<' + limit + '」勾选（套餐列#' + idx + '）：命中 ' + picked +
       ' 行，当前已选 ' + checked + ' 行');
     return checked;
+  }
+
+  // ===== 「发不出去筛选」：状态=封卡类 → 查询 → 勾选满足发不出去规则的行 =====
+  const SEALED_STATUS_LABEL = '疑似封卡'; // 首选状态名，找不到时退化为包含「封卡」的选项
+
+  // 只勾选满足「发不出去」规则的行（逐行读 发送总数/充值次数/连续失败/状态 列）
+  async function selectRowsByCantSend() {
+    const rows = currentQueryRows();
+    if (!rows.length) { log('查询结果为空'); return 0; }
+
+    const iTotal = findColumnIndex(['发送总数']);
+    const iTopup = findColumnIndex(['充值次数']);
+    const iFail = findColumnIndex(['连续失败', '失败数量', '失败数']);
+    const iStatus = findColumnIndex(['状态']);
+    if (iTotal < 0 || iTopup < 0 || iFail < 0 || iStatus < 0) {
+      log('⚠️ 缺少必要列（发送总数/充值次数/连续失败/状态），' +
+        '请先在表格「列设置」里把这些列显示出来');
+      return 0;
+    }
+    log('列定位：发送总数#' + iTotal + ' 充值次数#' + iTopup +
+      ' 连续失败#' + iFail + ' 状态#' + iStatus);
+
+    // 分页保护：当前页未覆盖全部数据时给出警告
+    const totalTxt = (document.querySelector('.el-pagination__total')?.innerText || '')
+      .replace(/[^\d]/g, '');
+    const totalNum = totalTxt ? Number(totalTxt) : 0;
+    if (totalNum && totalNum > rows.length) {
+      log('⚠️ 当前页仅 ' + rows.length + ' 行（共 ' + totalNum + ' 条），超出部分未参与勾选');
+    }
+
+    await clearRowSelection();
+    const numOf = (td) => {
+      const txt = (td?.innerText || '').replace(/[^\d.\-]/g, '');
+      return txt === '' ? NaN : Number(txt);
+    };
+    let picked = 0;
+    let skippedByData = 0;
+    for (const tr of rows) {
+      const tds = tr.querySelectorAll('td');
+      const totalSend = numOf(tds[iTotal]);
+      const topup = numOf(tds[iTopup]);
+      const fail = numOf(tds[iFail]);
+      const statusText = (tds[iStatus]?.innerText || '').trim();
+      if (!Number.isFinite(totalSend) || !Number.isFinite(topup) || !Number.isFinite(fail)) {
+        skippedByData++;
+        continue;
+      }
+      if (!cantSendHit(totalSend, topup, fail, statusText)) continue;
+      const cbInput = tr.querySelector('.el-checkbox__input');
+      if (!cbInput || cbInput.classList.contains('is-checked')) continue;
+      const cb = tr.querySelector('.el-checkbox') || cbInput;
+      fireClick(cb.querySelector('input') || cb);
+      picked++;
+      await sleep(90); // 逐行勾选，给框架响应时间
+    }
+    const checked = document.querySelectorAll(
+      '.el-table__body-wrapper .el-checkbox__input.is-checked'
+    ).length;
+    log('「发不出去」勾选：命中 ' + picked + ' 行，当前已选 ' + checked + ' 行' +
+      (skippedByData ? '（' + skippedByData + ' 行数值无法解析已跳过）' : ''));
+    return checked;
+  }
+
+  // 一键：清空设备 → 状态=封卡类 → 查询 → 勾选满足发不出去规则的行
+  async function runCantSendFilter() {
+    if (busy) { log('已有任务进行中，请稍候'); return; }
+    if (batchRunning) { log('批量任务进行中，请稍候'); return; }
+    busy = true;
+    const btn = document.getElementById(REPORT_ID + '-cantsend');
+    const oldText = btn ? btn.textContent : '';
+    const setBtn = (t, disabled) => {
+      if (!btn) return;
+      btn.textContent = t;
+      btn.disabled = !!disabled;
+      btn.style.opacity = disabled ? '0.6' : '1';
+      btn.style.cursor = disabled ? 'not-allowed' : 'pointer';
+    };
+    try {
+      setBtn('筛选中…', true);
+      log('🚀 开始「发不出去筛选」：清空设备 → 状态=封卡类（' + SEALED_STATUS_LABEL +
+        ' 等）→ 查询 → 按规则勾选');
+
+      // 1) 清空设备筛选（避免残留设备条件导致结果不全）
+      await syncDropdown('设备', () => false, () => true);
+
+      // 2) 状态 = 疑似封卡（找不到完全同名时退化为包含「封卡」的选项）
+      const okStatus = await syncDropdown(
+        '状态',
+        (t) => t === SEALED_STATUS_LABEL || t.includes('封卡')
+      );
+      if (!okStatus) {
+        log('⚠️ 状态筛选设置失败，已停止');
+        return;
+      }
+
+      // 3) 查询并等列表刷新
+      clickSearchButton();
+      setBtn('勾选中…', true);
+      await sleep(2200);
+
+      // 4) 勾选满足规则的行
+      const checked = await selectRowsByCantSend();
+      if (!checked) {
+        log('ℹ️ 没有满足「发不出去」规则的数据（或状态筛选结果为空）');
+      } else {
+        log('✅ 已勾选 ' + checked + ' 行满足「发不出去」规则的数据，可继续点「推送」或「修改状态」');
+      }
+    } catch (e) {
+      log('「发不出去筛选」执行出错:', e);
+    } finally {
+      setBtn(oldText || '发不出去筛选', false);
+      busy = false;
+    }
   }
 
   function findPushDialog() {
@@ -1544,5 +1690,5 @@
     start();
   }
 
-  log('v1.10.3 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.11.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
