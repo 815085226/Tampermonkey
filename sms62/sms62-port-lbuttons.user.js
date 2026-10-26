@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.10.2
+// @version      1.10.3
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（套餐<1000 数量 + 发不出去数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -28,7 +28,25 @@
   const PORT_LIST_API = '/prod-api/business/port/list';           // 端口列表（rows/total 分页）
   const STATUS_DICT_API = '/prod-api/system/dict/data/type/sys_port_status'; // 端口状态字典
   const REPORT_ID = 'gavin-lreport';
-  let pkgThreshold = 1000;    // 套餐阈值：统计「套餐 < N」的端口数量（报表头部可调整）
+  // 套餐阈值：统计「套餐 < N」的端口数量（报表头部可调整），存入 sessionStorage 刷新后保留
+  const PKG_THRESHOLD_KEY = 'gavin-lbtn-pkg-threshold';
+  const PKG_THRESHOLD_DEFAULT = 1000;
+  let pkgThreshold = loadPkgThreshold();
+
+  function loadPkgThreshold() {
+    try {
+      const v = parseInt(sessionStorage.getItem(PKG_THRESHOLD_KEY) || '', 10);
+      if (Number.isFinite(v) && v >= 0) return v;
+    } catch (e) { /* sessionStorage 不可用时用默认值 */ }
+    return PKG_THRESHOLD_DEFAULT;
+  }
+
+  function savePkgThreshold(v) {
+    try {
+      sessionStorage.setItem(PKG_THRESHOLD_KEY, String(v));
+    } catch (e) { /* 忽略写入失败 */ }
+  }
+
   let lastRows = [];          // 最近一次拉到的端口数据，调整阈值时免重新请求
 
   const BAR_ID = 'gavin-lbar';
@@ -726,7 +744,8 @@
     thInput.min = '0';
     thInput.step = '1';
     thInput.value = pkgThreshold;
-    thInput.title = '调整套餐阈值后立即重新统计；「换卡推送」批量流程的勾选条件也跟随此值';
+    thInput.title = '调整套餐阈值后立即重新统计；「换卡推送」批量流程的勾选条件也跟随此值' +
+      '（阈值会记住，刷新后保留，关闭标签页恢复默认 ' + PKG_THRESHOLD_DEFAULT + '）';
     thInput.style.cssText =
       'width:76px;padding:3px 6px;font-size:12px;border:1px solid #dcdfe6;' +
       'border-radius:4px;color:#606266;outline:none;';
@@ -735,6 +754,8 @@
       if (isNaN(v) || v < 0) { thInput.value = pkgThreshold; return; }
       if (v === pkgThreshold) return;
       pkgThreshold = v;
+      savePkgThreshold(v); // 记住阈值，刷新后仍生效
+      thInput.value = v;
       title.textContent = titleText();
       rebuildReportTable(); // 用已拉取的数据重算，无需重新请求
       refreshBatchMenuTitles(); // 批量推送菜单提示同步新阈值
@@ -1523,5 +1544,5 @@
     start();
   }
 
-  log('v1.10.2 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.10.3 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
