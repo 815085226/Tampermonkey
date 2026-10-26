@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.9.3
+// @version      1.9.4
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（套餐<1000 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -906,8 +906,7 @@
   }
 
   // ===== 批量推送（换卡）：hover L 按钮下拉触发 =====
-  const BATCH_SEND_TOTAL = 500;          // 批量流程使用的发送总数阈值
-  const BATCH_RULE = '>';                // 发送总数规则（页面默认是"<"，需切为">"）
+  // 批量条件：设备 = 单台 → 清空「发送总数」→ 查询 → 只勾选「套餐 < BATCH_PKG_LIMIT」的行
   // 菜单项 → 弹窗里「推送类型」选项的映射
   const MENU_PUSH_TYPE = {
     '换卡': '换卡',
@@ -934,7 +933,7 @@
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  // 切换"发送总数"的规则下拉（< / > / = ...）
+  // 切换"发送总数"的规则下拉（< / > / = ...）——备用：如需回到发送总数条件时可用
   async function setSendTotalRule(rule) {
     const c = findSendTotalControls();
     if (!c || !c.appendSelect) { log('未找到发送总数规则下拉'); return false; }
@@ -982,6 +981,93 @@
     if (ok) log('已自动全选查询结果');
     else log('全选后未检测到选中行（可能查询结果为空）');
     return ok;
+  }
+
+  // ===== 按「套餐 < N」筛选并勾选行（页面筛选栏没有套餐条件，只能逐行判断）=====
+  const BATCH_PKG_LIMIT = 1000; // 批量换卡推送使用的套餐阈值：套餐 < 1000 才推送
+
+  // 清空「发送总数」条件，避免上一轮残留的 limit/规则影响结果
+  function clearSendTotalCondition() {
+    const c = findSendTotalControls();
+    if (!c || !c.input) { log('⚠️ 未找到发送总数输入框，可能残留旧条件'); return false; }
+    if (String(c.input.value || '') === '') return true;
+    setInputValue(c.input, '');
+    log('已清空「发送总数」筛选条件');
+    return true;
+  }
+
+  // 「套餐」列在表格中的下标（表头与 tbody 的 td 顺序一致）
+  function findPkgColumnIndex() {
+    const heads = [...document.querySelectorAll('.el-table__header-wrapper thead th')];
+    for (let i = 0; i < heads.length; i++) {
+      if ((heads[i].innerText || '').replace(/\s+/g, '') === '套餐') return i;
+    }
+    return -1;
+  }
+
+  function currentQueryRows() {
+    return [...document.querySelectorAll(
+      '.el-table__body-wrapper tbody tr.el-table__row'
+    )];
+  }
+
+  // 清空表格已勾选行（表头复选框：全选 → 全不选）
+  async function clearRowSelection() {
+    if (!document.querySelector('.el-table__body-wrapper .el-checkbox__input.is-checked')) return;
+    const headerCb = document.querySelector(
+      '.el-table__header-wrapper .el-table__cell .el-checkbox'
+    );
+    if (!headerCb) return;
+    const input = headerCb.querySelector('input');
+    const headerChecked = headerCb
+      .querySelector('.el-checkbox__input')
+      ?.classList.contains('is-checked');
+    if (!headerChecked) { fireClick(input || headerCb); await sleep(400); } // 先全选
+    fireClick(input || headerCb); // 再全不选
+    await sleep(400);
+  }
+
+  // 只勾选「套餐 < limit」的行，返回勾选到的行数
+  async function selectRowsByPkg(limit) {
+    const rows = currentQueryRows();
+    if (!rows.length) { log('查询结果为空'); return 0; }
+
+    const idx = findPkgColumnIndex();
+    if (idx < 0) {
+      log('⚠️ 未找到「套餐」列，退化为全选查询结果');
+      return (await selectAllQueryRows()) ? currentQueryRows().length : 0;
+    }
+
+    // 分页保护提示：当前页未覆盖全部数据时给出警告
+    const totalTxt = (document.querySelector('.el-pagination__total')?.innerText || '')
+      .replace(/[^\d]/g, '');
+    const totalNum = totalTxt ? Number(totalTxt) : 0;
+    if (totalNum && totalNum > rows.length) {
+      log('⚠️ 当前页仅 ' + rows.length + ' 行（共 ' + totalNum + ' 条），超出部分未参与勾选');
+    }
+
+    await clearRowSelection();
+    let picked = 0;
+    for (const tr of rows) {
+      const cell = tr.querySelectorAll('td')[idx];
+      if (!cell) continue;
+      // 单元格可能带千分位/单位，取数字比较
+      const txt = (cell.innerText || '').replace(/[^\d.\-]/g, '');
+      const v = txt === '' ? NaN : Number(txt);
+      if (!(Number.isFinite(v) && v < limit)) continue;
+      const cbInput = tr.querySelector('.el-checkbox__input');
+      if (!cbInput || cbInput.classList.contains('is-checked')) continue;
+      const cb = tr.querySelector('.el-checkbox') || cbInput;
+      fireClick(cb.querySelector('input') || cb);
+      picked++;
+      await sleep(90); // 逐行勾选，给框架响应时间
+    }
+    const checked = document.querySelectorAll(
+      '.el-table__body-wrapper .el-checkbox__input.is-checked'
+    ).length;
+    log('按「套餐<' + limit + '」勾选（套餐列#' + idx + '）：命中 ' + picked +
+      ' 行，当前已选 ' + checked + ' 行');
+    return checked;
   }
 
   function findPushDialog() {
@@ -1094,7 +1180,7 @@
     const prog = batchProgress();
     try {
       log('🚀 开始批量' + menuItem + '推送：L ' + groupName + '（' +
-        devices.length + ' 台设备，发送总数>' + BATCH_SEND_TOTAL + '）');
+        devices.length + ' 台设备，套餐<' + BATCH_PKG_LIMIT + '）');
       for (let i = 0; i < devices.length; i++) {
         if (batchStopFlag) {
           log('🛑 批量任务已终止，剩余 ' + (devices.length - i) + ' 台设备未处理');
@@ -1108,12 +1194,8 @@
         const okDev = await syncDropdown('设备', (t) => t === dev);
         if (!okDev) { log('⚠️ 设备 ' + dev + ' 筛选设置失败，跳过'); continue; }
 
-        // 2) 发送总数 = 500，规则切为 >
-        const c = findSendTotalControls();
-        if (c && c.input) setInputValue(c.input, String(BATCH_SEND_TOTAL));
-        else log('⚠️ 未找到发送总数输入框');
-        const okRule = await setSendTotalRule(BATCH_RULE);
-        if (!okRule) log('⚠️ 发送总数规则切换失败，结果可能不含 >' + BATCH_SEND_TOTAL + ' 条件');
+        // 2) 清空「发送总数」条件（改用套餐阈值筛选，避免残留 >500 之类的旧条件）
+        clearSendTotalCondition();
 
         // 3) 查询
         clickSearchButton();
@@ -1123,11 +1205,14 @@
           break;
         }
 
-        // 3.5) 自动勾选查询结果（推送按钮要求先选中行）
-        const selected = await selectAllQueryRows();
+        // 3.5) 只勾选「套餐 < BATCH_PKG_LIMIT」的行（推送按钮要求先选中行）
+        prog('📋 批量' + menuItem + '（' + groupName + '）' +
+          (i + 1) + '/' + devices.length + ' — 设备 ' + dev +
+          '：勾选「套餐<' + BATCH_PKG_LIMIT + '」的端口…');
+        const selected = await selectRowsByPkg(BATCH_PKG_LIMIT);
         if (!selected) {
-          log('ℹ️ 设备 ' + dev + ': 没有可勾选的查询结果（发送总数>' +
-            BATCH_SEND_TOTAL + ' 无数据），跳过');
+          log('ℹ️ 设备 ' + dev + ': 无「套餐<' + BATCH_PKG_LIMIT +
+            '」的端口，跳过');
           continue;
         }
 
@@ -1229,7 +1314,7 @@
     for (const item of ['换卡']) {
       const mi = document.createElement('div');
       mi.textContent = item + '推送';
-      mi.title = '逐台设备: 筛选设备 + 发送总数>' + BATCH_SEND_TOTAL + ' → 查询 → 推送（' + (MENU_PUSH_TYPE[item] || item) + '）→ 等人工确认';
+      mi.title = '逐台设备: 筛选设备 → 查询 → 只勾选「套餐<' + BATCH_PKG_LIMIT + '」的端口 → 推送（' + (MENU_PUSH_TYPE[item] || item) + '）→ 等人工确认';
       mi.style.cssText =
         'padding:6px 14px;font-size:12px;color:#606266;cursor:pointer;white-space:nowrap;';
       mi.addEventListener('mouseenter', () => {
@@ -1340,5 +1425,5 @@
     start();
   }
 
-  log('v1.9.3 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.9.4 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
