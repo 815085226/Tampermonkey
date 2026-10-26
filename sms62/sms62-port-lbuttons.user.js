@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.13.0
-// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行（每次自动筛选前先点页面「重置」清空历史条件）
+// @version      1.14.0
+// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行（每次自动筛选前先点页面「重置」清空历史条件）
 // @author       Gavin
 // @match        http://web.sms62.com/*
 // @match        https://web.sms62.com/*
@@ -335,6 +335,8 @@
   //                                : 发送总数（不扣减）
   const CANT_SEND_MIN_TOPUP = 1; // 充值次数下限（含），即「充值次数 >= 1」
   const PACKAGE_UNIT = 1500;     // 每次充值对应的发送额度（充值次数 >1 时按 (N-1) 扣减）
+  // 「发送总数 > N」统计：固定阈值，不跟随套餐阈值、也不提供输入框
+  const SEND_TOTAL_THRESHOLD = 500;
 
   // 纯判定（报表统计与表格逐行勾选共用）：statusText 为状态中文标签
   function cantSendHit(totalSend, topup, fail, statusText) {
@@ -369,6 +371,11 @@
         const v = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
         return Number.isFinite(v) && v < pkgThreshold;
       }).length;
+      // 发送总数 > 500 的端口数量（固定阈值，与套餐阈值无关）
+      const overSend = groupRows.filter((r) => {
+        const v = Number(r.t ?? r.totalSend);
+        return Number.isFinite(v) && v > SEND_TOTAL_THRESHOLD;
+      }).length;
       const cantSend = groupRows.filter(isCantSend).length; // 发不出去的卡数
       const statusMap = {};
       let pkgSum = 0; // 套餐汇总总数（组内 pkgs 求和）
@@ -381,6 +388,7 @@
         name,
         devices,
         total: groupRows.length,
+        overSend,
         lowPkg,
         cantSend,
         statusMap,
@@ -436,11 +444,11 @@
 
     const tbl = document.createElement('table');
     tbl.style.cssText =
-      'border-collapse:collapse;font-size:13px;min-width:880px;width:100%;';
+      'border-collapse:collapse;font-size:13px;min-width:980px;width:100%;';
     const thead = document.createElement('thead');
     thead.innerHTML =
       '<tr>' +
-      ['分组', '端口总数', '套餐总数', '套餐&lt;' + pkgThreshold, '发不出去', '状态分布']
+      ['分组', '端口总数', '发送总数&gt;' + SEND_TOTAL_THRESHOLD, '套餐总数', '套餐&lt;' + pkgThreshold, '发不出去', '状态分布']
         .map(
           (h) =>
             '<th style="border:1px solid #ebeef5;background:#f5f7fa;padding:8px 12px;' +
@@ -490,6 +498,15 @@
       tdTotal.style.cssText = 'border:1px solid #ebeef5;padding:8px 12px;';
       tdTotal.textContent = s.total;
 
+      // 发送总数 > 500（固定阈值，不随套餐阈值变化）
+      const tdSendOver = document.createElement('td');
+      tdSendOver.style.cssText =
+        'border:1px solid #ebeef5;padding:8px 12px;' +
+        (s.overSend > 0 ? 'color:#409eff;font-weight:600;' : 'color:#909399;');
+      tdSendOver.textContent = s.overSend;
+      tdSendOver.title =
+        '发送总数 > ' + SEND_TOTAL_THRESHOLD + ' 的端口数量（固定阈值，与套餐阈值无关）';
+
       // 套餐汇总总数（组内 pkgs 求和）
       const pkgTd = document.createElement('td');
       pkgTd.style.cssText = 'border:1px solid #ebeef5;padding:8px 12px;';
@@ -519,6 +536,7 @@
 
       tr.appendChild(tdName);
       tr.appendChild(tdTotal);
+      tr.appendChild(tdSendOver);
       tr.appendChild(pkgTd);
       tr.appendChild(tdOver);
       tr.appendChild(tdCant);
@@ -533,11 +551,13 @@
     if (stats.length) {
       const sumMap = {};
       let sumTotal = 0;
+      let sumSendOver = 0;
       let sumLowPkg = 0;
       let sumCantSend = 0;
       let sumPkg = 0;
       for (const s of stats) {
         sumTotal += s.total;
+        sumSendOver += s.overSend;
         sumLowPkg += s.lowPkg;
         sumCantSend += s.cantSend;
         sumPkg += s.pkgSum;
@@ -555,6 +575,13 @@
       tdTotal.style.cssText =
         'border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;';
       tdTotal.textContent = sumTotal;
+
+      // 发送总数 > 500（跨组合计）
+      const tdSendOver = document.createElement('td');
+      tdSendOver.style.cssText =
+        'border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;' +
+        (sumSendOver > 0 ? 'color:#409eff;' : 'color:#909399;');
+      tdSendOver.textContent = sumSendOver;
 
       // 套餐汇总总数（跨组合计）
       const pkgTd = document.createElement('td');
@@ -599,6 +626,7 @@
       }
       sumTr.appendChild(tdName);
       sumTr.appendChild(tdTotal);
+      sumTr.appendChild(tdSendOver);
       sumTr.appendChild(pkgTd);
       sumTr.appendChild(tdOver);
       sumTr.appendChild(tdCant);
@@ -616,6 +644,8 @@
       '；「发不出去」= 封卡类状态 + 充值次数≥' + CANT_SEND_MIN_TOPUP +
       ' + 失败数量≥有效发送数（有效发送数 = 充值次数>1 ? 发送总数-(充值次数-1)×' +
       PACKAGE_UNIT + ' : 发送总数）' +
+      '；「发送总数>' + SEND_TOTAL_THRESHOLD +
+      '」为固定阈值统计（不随上方套餐阈值变化）' +
       '；「换卡推送」批量流程的勾选条件 = 套餐＜' + pkgThreshold +
       '（跟随上方输入框）' +
       '；点击状态标签可反筛列表；点「发不出去」数字 = 该分组设备 + 封卡类状态 → 查询并勾选满足规则的行（汇总行=不限设备），仅勾当前页；点「刷新报表」强制拉最新';
@@ -750,7 +780,7 @@
     const title = document.createElement('div');
     title.style.cssText = 'font-weight:600;font-size:14px;color:#303133;';
     const titleText = () =>
-      '📊 L 组数据报表（套餐<' + pkgThreshold + ' / 状态分布）';
+      '📊 L 组数据报表（发送>' + SEND_TOTAL_THRESHOLD + ' / 套餐<' + pkgThreshold + ' / 状态分布）';
     title.textContent = titleText();
 
     const ops = document.createElement('div');
