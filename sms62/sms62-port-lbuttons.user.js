@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.12.0
-// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行
+// @version      1.13.0
+// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行（每次自动筛选前先点页面「重置」清空历史条件）
 // @author       Gavin
 // @match        http://web.sms62.com/*
 // @match        https://web.sms62.com/*
@@ -952,6 +952,35 @@
     return false;
   }
 
+  // 找查询区（包含 span.query-label 的 form/容器），用于把按钮查找限定在筛选栏内
+  function findQueryScope() {
+    const lb = document.querySelector('span.query-label');
+    if (!lb) return null;
+    return lb.closest('form') || lb.closest('.el-form') || null;
+  }
+
+  // 点击筛选栏的「重置」按钮，清空所有历史查询条件（含发送总数、卡号、运营商等残留）
+  // 每次自动筛选前都先执行，保证结果只由本次设置的条件决定
+  async function clickResetButton() {
+    const scope = findQueryScope();
+    const roots = scope ? [scope, document] : [document];
+    for (const root of roots) {
+      for (const b of root.querySelectorAll('button')) {
+        if (!isVisible(b)) continue;
+        if (b.closest('.el-dialog')) continue; // 跳过弹窗内的按钮，只清筛选栏
+        const t = b.textContent.replace(/\s/g, '');
+        if (t === '重置' || t === '重置条件' || t === '清空' || t.toLowerCase() === 'reset') {
+          fireClick(b);
+          log('已点击「' + b.textContent.trim() + '」清空查询条件');
+          await sleep(700); // 等表单清空（部分页面重置后会自行查询一次）
+          return true;
+        }
+      }
+    }
+    log('未找到「重置」按钮，按当前条件继续');
+    return false;
+  }
+
   // 同步多选下拉的选中项：按 wantFn 选上/取消选项（wantFn: 选项文本 => 是否想要）
   async function syncSelectionBy(dd, wantFn) {
     for (let pass = 0; pass < 3; pass++) {
@@ -1025,13 +1054,19 @@
     busy = true;
     try {
       let ok = true;
+      // 先点「重置」清空历史条件：避免上次残留的发送总数/卡号等条件影响本次结果
+      const resetOk = await clickResetButton();
+
       if (devices !== undefined) {
         const wantFn = devices
           ? (t) => matchDevice(t, devices)
           : () => false; // 清空：取消所有已选设备
-        ok =
-          (await syncDropdown('设备', wantFn, devices ? undefined : () => true)) &&
-          ok;
+        // 重置已成功时无需再逐个取消设备
+        if (!(resetOk && devices === null)) {
+          ok =
+            (await syncDropdown('设备', wantFn, devices ? undefined : () => true)) &&
+            ok;
+        }
       }
       if (statusLabel) {
         ok =
@@ -1329,11 +1364,14 @@
     };
     try {
       setBtn('筛选中…', true);
-      log('🚀 开始「发不出去筛选」：设备=' +
+      log('🚀 开始「发不出去筛选」：重置条件 → 设备=' +
         (devices ? groupName || '指定组' : '全部') +
         ' → 状态=封卡类（' + SEALED_STATUS_LABEL + ' 等）→ 查询 → 按规则勾选');
 
-      // 1) 设备：有组 → 设为该组设备；无组 → 清空（避免残留条件导致结果不全）
+      // 0) 先点「重置」清空历史条件，避免残留条件把结果范围弄错
+      const resetOk = await clickResetButton();
+
+      // 1) 设备：有组 → 设为该组设备；无组 → 重置后已为空，无需再清
       if (devices) {
         const okDev = await syncDropdown('设备', (t) => matchDevice(t, devices));
         if (!okDev) {
@@ -1342,7 +1380,7 @@
             ' 按钮确认设备筛选，再点「发不出去筛选」');
           return;
         }
-      } else {
+      } else if (!resetOk) {
         await syncDropdown('设备', () => false, () => true);
       }
 
@@ -1498,6 +1536,9 @@
         const dev = devices[i];
         prog('📋 批量' + menuItem + '（' + groupName + '）' +
           (i + 1) + '/' + devices.length + ' — 设备 ' + dev + '：设置筛选…');
+
+        // 0) 先点「重置」清空上一轮残留的查询条件（设备/状态/卡号/发送总数）
+        await clickResetButton();
 
         // 1) 设备筛选 = 仅这台设备
         const okDev = await syncDropdown('设备', (t) => t === dev);

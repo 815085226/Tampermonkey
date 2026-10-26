@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         sms62 端口页自动 200/page
 // @namespace    gavin.sms62
-// @version      1.2.0
-// @description  自动将 http://web.sms62.com/mkt/port 列表分页大小切换为 200/page；并在 L 按钮条后加「买套餐」按钮（筛选状态=新插卡→全选→修改状态→选套餐用尽→等人工确认）
+// @version      1.3.0
+// @description  自动将 http://web.sms62.com/mkt/port 列表分页大小切换为 200/page；并在 L 按钮条后加「买套餐」按钮（重置条件→筛选状态=新插卡→全选→修改状态→选套餐用尽→等人工确认）
 // @author       Gavin
 // @match        http://web.sms62.com/*
 // @match        https://web.sms62.com/*
@@ -198,6 +198,28 @@
     return false;
   }
 
+  // 点击筛选栏「重置」按钮，清空所有历史查询条件（设备/状态/卡号/发送总数等）
+  async function clickResetButton() {
+    const lb = document.querySelector('span.query-label');
+    const formScope = lb && (lb.closest('form') || lb.closest('.el-form'));
+    const roots = formScope ? [formScope, document] : [document];
+    for (const root of roots) {
+      for (const b of root.querySelectorAll('button')) {
+        if (!isVisible(b)) continue;
+        if (b.closest('.el-dialog')) continue; // 跳过弹窗内的按钮
+        const t = b.textContent.replace(/\s/g, '');
+        if (t === '重置' || t === '重置条件' || t === '清空' || t.toLowerCase() === 'reset') {
+          fireClick(b);
+          log('已点击「' + b.textContent.trim() + '」清空查询条件');
+          await sleep(700);
+          return true;
+        }
+      }
+    }
+    log('未找到「重置」按钮，按当前条件继续');
+    return false;
+  }
+
   // 打开某 label 的下拉、按 wantFn 同步选中项、收起
   async function syncDropdown(labelText, wantFn, ddMatcher) {
     const sel = findSelectAfter(labelText);
@@ -324,23 +346,28 @@
       setBtn('执行中…', true);
       log('🚀 买套餐流程开始：状态=' + BUY_STATUS_FILTER + ' → 全选 → 修改状态 → ' + BUY_NEW_STATUS);
 
-      // 1) 清空设备筛选（避免残留设备条件导致结果不全）
-      const cleared = await syncDropdown('设备', () => false, () => true);
-      if (!cleared) log('⚠️ 设备筛选未能清空，继续执行（请自行确认设备栏为空）');
+      // 1) 先点「重置」清空历史查询条件（残留的设备/卡号/发送总数会污染结果）
+      const resetOk = await clickResetButton();
 
-      // 2) 状态筛选 = 新插卡
+      // 2) 清空设备筛选（重置已清空则跳过）
+      if (!resetOk) {
+        const cleared = await syncDropdown('设备', () => false, () => true);
+        if (!cleared) log('⚠️ 设备筛选未能清空，继续执行（请自行确认设备栏为空）');
+      }
+
+      // 3) 状态筛选 = 新插卡
       const okStatus = await syncDropdown('状态', (t) => t === BUY_STATUS_FILTER);
       if (!okStatus) { log('❌ 状态筛选设置失败，流程终止'); return; }
 
-      // 3) 查询
+      // 4) 查询
       clickSearchButton();
       await sleep(2500);
 
-      // 4) 全选查询结果
+      // 5) 全选查询结果
       const okSel = await selectAllQueryRows();
       if (!okSel) { log('❌ 未能勾选任何数据（可能无' + BUY_STATUS_FILTER + '端口），流程终止'); return; }
 
-      // 5) 点「修改状态」按钮
+      // 6) 点「修改状态」按钮
       let modifyBtn = null;
       for (const b of document.querySelectorAll('button')) {
         if (b.textContent.trim() === '修改状态' && isVisible(b) && !b.disabled) { modifyBtn = b; break; }
@@ -348,13 +375,13 @@
       if (!modifyBtn) { log('❌ 未找到可用的「修改状态」按钮（按钮可能被禁用），流程终止'); return; }
       modifyBtn.click();
 
-      // 6) 等弹窗出现并选择新状态
+      // 7) 等弹窗出现并选择新状态
       const dlg = await waitForStatusDialog(8000);
       if (!dlg) { log('❌ 「修改状态」弹窗未出现，流程终止'); return; }
       const okSet = await setNewStatusInDialog(dlg, BUY_NEW_STATUS);
       if (!okSet) return;
 
-      // 7) 等人工点「确定」或「取消」（弹窗消失即结束）
+      // 8) 等人工点「确定」或「取消」（弹窗消失即结束）
       const end = Date.now() + 10 * 60 * 1000; // 最多等 10 分钟
       while (findStatusDialog() && Date.now() < end) await sleep(500);
       log(findStatusDialog() ? '⏱️ 等待超时，流程结束（弹窗仍开着，请人工处理）' : '✅ 弹窗已关闭，买套餐流程结束');
