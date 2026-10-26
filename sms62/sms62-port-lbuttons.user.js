@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.11.0
-// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（套餐<1000 数量 + 发不出去数量 + 各状态分布）
+// @version      1.12.0
+// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行
 // @author       Gavin
 // @match        http://web.sms62.com/*
 // @match        https://web.sms62.com/*
@@ -408,6 +408,28 @@
     return span;
   }
 
+  // 可点击的「发不出去」数字：点击 = 设备组(或全部) + 状态含封卡 → 查询 → 按规则勾选
+  // devices: 数组=限定该设备组；null=不限设备（汇总行）
+  function makeCantSendChip(count, devices, groupName) {
+    const b = document.createElement('span');
+    b.style.cssText =
+      'display:inline-block;padding:1px 6px;border-radius:3px;cursor:pointer;' +
+      'background:#fef0f0;color:#f56c6c;font-weight:600;transition:all .15s;';
+    b.textContent = String(count);
+    b.title =
+      '点击筛选并勾选：' +
+      (Array.isArray(devices) ? groupName + ' 设备组' : '全部设备') +
+      ' + 状态含「封卡」的数据里、满足发不出去规则的行' +
+      '（仅勾选当前页，跨页请手动翻页后再点）';
+    b.addEventListener('mouseenter', () => (b.style.textDecoration = 'underline'));
+    b.addEventListener('mouseleave', () => (b.style.textDecoration = 'none'));
+    b.addEventListener('click', (e) => {
+      e.stopPropagation(); // 避免触发外层折叠/行点击
+      runCantSendFilter({ devices, groupName });
+    });
+    return b;
+  }
+
   function buildReportTable(stats) {
     const wrap = document.createElement('div');
     wrap.style.cssText = 'padding:10px 14px;overflow-x:auto;';
@@ -481,11 +503,15 @@
       tdOver.title = '套餐 < ' + pkgThreshold + ' 的端口数量';
 
       // 发不出去：封卡状态 + 充值次数>=1 + 失败数量>=有效发送数
+      // 有数量时可点击 → 设备组 + 封卡类状态筛选并勾选（数字与勾选结果同口径）
       const tdCant = document.createElement('td');
-      tdCant.style.cssText =
-        'border:1px solid #ebeef5;padding:8px 12px;' +
-        (s.cantSend > 0 ? 'color:#f56c6c;font-weight:600;' : 'color:#909399;');
-      tdCant.textContent = s.cantSend;
+      tdCant.style.cssText = 'border:1px solid #ebeef5;padding:8px 12px;';
+      if (s.cantSend > 0) {
+        tdCant.appendChild(makeCantSendChip(s.cantSend, s.devices, s.name));
+      } else {
+        tdCant.style.color = '#909399';
+        tdCant.textContent = '0';
+      }
       tdCant.title =
         '发不出去判定：状态含「封卡」且 充值次数≥' + CANT_SEND_MIN_TOPUP +
         ' 且 失败数量 ≥ 有效发送数（有效发送数 = 充值次数>1 ? ' +
@@ -542,12 +568,16 @@
         (sumLowPkg > 0 ? 'color:#e6a23c;' : 'color:#909399;');
       tdOver.textContent = sumLowPkg;
 
-      // 发不出去（跨组合计）
+      // 发不出去（跨组合计）：点击 = 不限设备 + 封卡类状态筛选并勾选
       const tdCant = document.createElement('td');
       tdCant.style.cssText =
-        'border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;' +
-        (sumCantSend > 0 ? 'color:#f56c6c;' : 'color:#909399;');
-      tdCant.textContent = sumCantSend;
+        'border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;';
+      if (sumCantSend > 0) {
+        tdCant.appendChild(makeCantSendChip(sumCantSend, null, ''));
+      } else {
+        tdCant.style.color = '#909399';
+        tdCant.textContent = '0';
+      }
 
       const statusTd = document.createElement('td');
       statusTd.style.cssText =
@@ -588,7 +618,7 @@
       PACKAGE_UNIT + ' : 发送总数）' +
       '；「换卡推送」批量流程的勾选条件 = 套餐＜' + pkgThreshold +
       '（跟随上方输入框）' +
-      '；点击状态标签可反向筛选列表，点「刷新报表」强制拉最新';
+      '；点击状态标签可反筛列表；点「发不出去」数字 = 该分组设备 + 封卡类状态 → 查询并勾选满足规则的行（汇总行=不限设备），仅勾当前页；点「刷新报表」强制拉最新';
     wrap.appendChild(foot);
     return wrap;
   }
@@ -783,7 +813,8 @@
     cantBtn.textContent = '发不出去筛选';
     cantBtn.title = '清空设备筛选 → 状态设为「' + SEALED_STATUS_LABEL +
       '」（含其他封卡类状态）→ 查询 → 勾选满足「发不出去」规则的行' +
-      '（封卡类状态 + 充值次数≥' + CANT_SEND_MIN_TOPUP + ' + 失败数量≥有效发送数）';
+      '（封卡类状态 + 充值次数≥' + CANT_SEND_MIN_TOPUP + ' + 失败数量≥有效发送数）' +
+      '\n提示：直接点报表里「发不出去」列的数字，可只筛该分组的设备';
     cantBtn.style.cssText =
       'padding:4px 12px;font-size:12px;border:1px solid #f5c6cb;border-radius:4px;' +
       'background:#fef0f0;color:#f56c6c;cursor:pointer;white-space:nowrap;';
@@ -1278,8 +1309,12 @@
     return checked;
   }
 
-  // 一键：清空设备 → 状态=封卡类 → 查询 → 勾选满足发不出去规则的行
-  async function runCantSendFilter() {
+  // 一键：设备（可选限定某组）→ 状态=封卡类 → 查询 → 勾选满足发不出去规则的行
+  // opts.devices: 数组=限定该设备组（报表组行数字点击）；null/undefined=清空设备（全部）
+  async function runCantSendFilter(opts) {
+    const o = opts || {};
+    const devices = Array.isArray(o.devices) ? o.devices : null;
+    const groupName = o.groupName || '';
     if (busy) { log('已有任务进行中，请稍候'); return; }
     if (batchRunning) { log('批量任务进行中，请稍候'); return; }
     busy = true;
@@ -1294,11 +1329,22 @@
     };
     try {
       setBtn('筛选中…', true);
-      log('🚀 开始「发不出去筛选」：清空设备 → 状态=封卡类（' + SEALED_STATUS_LABEL +
-        ' 等）→ 查询 → 按规则勾选');
+      log('🚀 开始「发不出去筛选」：设备=' +
+        (devices ? groupName || '指定组' : '全部') +
+        ' → 状态=封卡类（' + SEALED_STATUS_LABEL + ' 等）→ 查询 → 按规则勾选');
 
-      // 1) 清空设备筛选（避免残留设备条件导致结果不全）
-      await syncDropdown('设备', () => false, () => true);
+      // 1) 设备：有组 → 设为该组设备；无组 → 清空（避免残留条件导致结果不全）
+      if (devices) {
+        const okDev = await syncDropdown('设备', (t) => matchDevice(t, devices));
+        if (!okDev) {
+          log('⚠️ 设备组「' + groupName + '」设置失败，已停止 —— ' +
+            '避免结果超出该分组范围；可先点上方 ' + groupName +
+            ' 按钮确认设备筛选，再点「发不出去筛选」');
+          return;
+        }
+      } else {
+        await syncDropdown('设备', () => false, () => true);
+      }
 
       // 2) 状态 = 疑似封卡（找不到完全同名时退化为包含「封卡」的选项）
       const okStatus = await syncDropdown(
@@ -1320,7 +1366,9 @@
       if (!checked) {
         log('ℹ️ 没有满足「发不出去」规则的数据（或状态筛选结果为空）');
       } else {
-        log('✅ 已勾选 ' + checked + ' 行满足「发不出去」规则的数据，可继续点「推送」或「修改状态」');
+        const scope = devices ? groupName + ' 组' : '全部设备';
+        log('✅ [' + scope + '] 已勾选 ' + checked +
+          ' 行满足「发不出去」规则的数据，可继续点「推送」或「修改状态」');
       }
     } catch (e) {
       log('「发不出去筛选」执行出错:', e);
