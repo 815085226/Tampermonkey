@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.9.2
-// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 各状态分布）
+// @version      1.9.3
+// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（套餐<1000 数量 + 各状态分布）
 // @author       Gavin
 // @match        http://web.sms62.com/*
 // @match        https://web.sms62.com/*
@@ -28,7 +28,7 @@
   const PORT_LIST_API = '/prod-api/business/port/list';           // 端口列表（rows/total 分页）
   const STATUS_DICT_API = '/prod-api/system/dict/data/type/sys_port_status'; // 端口状态字典
   const REPORT_ID = 'gavin-lreport';
-  let over500Threshold = 500; // 发送总数阈值（可在报表头部输入框调整）
+  let pkgThreshold = 1000;    // 套餐阈值：统计「套餐 < N」的端口数量（报表头部可调整）
   let lastRows = [];          // 最近一次拉到的端口数据，调整阈值时免重新请求
 
   const BAR_ID = 'gavin-lbar';
@@ -313,9 +313,12 @@
         // 兼容两种行结构：接口原始行 / 本地缓存的精简行（d/t/s）
         matchDevice(String(r.d ?? r.deviceName ?? '').trim(), devices)
       );
-      const over500 = groupRows.filter(
-        (r) => Number(r.t ?? r.totalSend) > over500Threshold
-      ).length;
+      // 套餐 < 阈值 的端口数量（空/无套餐数据不计入）
+      const lowPkg = groupRows.filter((r) => {
+        const raw = r.p ?? r.pkgs;
+        const v = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
+        return Number.isFinite(v) && v < pkgThreshold;
+      }).length;
       const statusMap = {};
       let pkgSum = 0; // 套餐汇总总数（组内 pkgs 求和）
       for (const r of groupRows) {
@@ -327,7 +330,7 @@
         name,
         devices,
         total: groupRows.length,
-        over500,
+        lowPkg,
         statusMap,
         pkgSum,
       });
@@ -363,7 +366,7 @@
     const thead = document.createElement('thead');
     thead.innerHTML =
       '<tr>' +
-      ['分组', '端口总数', '套餐总数', '发送总数&gt;' + over500Threshold, '状态分布']
+      ['分组', '端口总数', '套餐总数', '套餐&lt;' + pkgThreshold, '状态分布']
         .map(
           (h) =>
             '<th style="border:1px solid #ebeef5;background:#f5f7fa;padding:8px 12px;' +
@@ -421,8 +424,9 @@
       const tdOver = document.createElement('td');
       tdOver.style.cssText =
         'border:1px solid #ebeef5;padding:8px 12px;' +
-        (s.over500 > 0 ? 'color:#f56c6c;font-weight:600;' : 'color:#909399;');
-      tdOver.textContent = s.over500;
+        (s.lowPkg > 0 ? 'color:#e6a23c;font-weight:600;' : 'color:#909399;');
+      tdOver.textContent = s.lowPkg;
+      tdOver.title = '套餐 < ' + pkgThreshold + ' 的端口数量';
 
       tr.appendChild(tdName);
       tr.appendChild(tdTotal);
@@ -439,11 +443,11 @@
     if (stats.length) {
       const sumMap = {};
       let sumTotal = 0;
-      let sumOver500 = 0;
+      let sumLowPkg = 0;
       let sumPkg = 0;
       for (const s of stats) {
         sumTotal += s.total;
-        sumOver500 += s.over500;
+        sumLowPkg += s.lowPkg;
         sumPkg += s.pkgSum;
         for (const [label, count] of Object.entries(s.statusMap)) {
           sumMap[label] = (sumMap[label] || 0) + count;
@@ -469,8 +473,8 @@
       const tdOver = document.createElement('td');
       tdOver.style.cssText =
         'border:1px solid #ebeef5;padding:8px 12px;font-weight:700;background:#fafafa;' +
-        (sumOver500 > 0 ? 'color:#f56c6c;' : 'color:#909399;');
-      tdOver.textContent = sumOver500;
+        (sumLowPkg > 0 ? 'color:#e6a23c;' : 'color:#909399;');
+      tdOver.textContent = sumLowPkg;
       const statusTd = document.createElement('td');
       statusTd.style.cssText =
         'border:1px solid #ebeef5;padding:8px 12px;background:#fafafa;';
@@ -616,7 +620,7 @@
     const title = document.createElement('div');
     title.style.cssText = 'font-weight:600;font-size:14px;color:#303133;';
     const titleText = () =>
-      '📊 L 组数据报表（发送总数>' + over500Threshold + ' / 状态分布）';
+      '📊 L 组数据报表（套餐<' + pkgThreshold + ' / 状态分布）';
     title.textContent = titleText();
 
     const ops = document.createElement('div');
@@ -637,27 +641,27 @@
     updSpan.textContent = '更新中…';
     ops.appendChild(updSpan);
 
-    // 阈值输入：调整"发送总数>N"的 N，改动后用本地数据即时重算（不发请求）
+    // 阈值输入：调整"套餐<N"的 N，改动后用本地数据即时重算（不发请求）
     const thLabel = document.createElement('span');
     thLabel.style.cssText = 'font-size:12px;color:#909399;';
-    thLabel.textContent = '发送总数＞';
+    thLabel.textContent = '套餐＜';
     const thInput = document.createElement('input');
     thInput.type = 'number';
     thInput.min = '0';
     thInput.step = '1';
-    thInput.value = over500Threshold;
-    thInput.title = '调整阈值后立即重新统计';
+    thInput.value = pkgThreshold;
+    thInput.title = '调整套餐阈值后立即重新统计';
     thInput.style.cssText =
       'width:76px;padding:3px 6px;font-size:12px;border:1px solid #dcdfe6;' +
       'border-radius:4px;color:#606266;outline:none;';
     const applyThreshold = () => {
       const v = parseInt(thInput.value, 10);
-      if (isNaN(v) || v < 0) { thInput.value = over500Threshold; return; }
-      if (v === over500Threshold) return;
-      over500Threshold = v;
+      if (isNaN(v) || v < 0) { thInput.value = pkgThreshold; return; }
+      if (v === pkgThreshold) return;
+      pkgThreshold = v;
       title.textContent = titleText();
       rebuildReportTable(); // 用已拉取的数据重算，无需重新请求
-      log('阈值已调整为 发送总数>' + over500Threshold + '，报表已重新统计');
+      log('阈值已调整为 套餐<' + pkgThreshold + '，报表已重新统计');
     };
     thInput.addEventListener('change', applyThreshold);
     thInput.addEventListener('keydown', (e) => {
@@ -1336,5 +1340,5 @@
     start();
   }
 
-  log('v1.9.2 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.9.3 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
