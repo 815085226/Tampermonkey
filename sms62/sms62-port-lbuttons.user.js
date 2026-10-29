@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.14.0
-// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行（每次自动筛选前先点页面「重置」清空历史条件）
+// @version      1.15.0
+// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行（每次自动筛选前先点页面「重置」清空历史条件）；另在 /mkt/send-task 的「批量创建失败补发任务」弹窗里，表格下方自动显示汇总（任务数 + 提交失败合计 + 发送失败合计）
 // @author       Gavin
 // @match        http://web.sms62.com/*
 // @match        https://web.sms62.com/*
@@ -1738,6 +1738,125 @@
     if (old) old.replaceWith(buildBar());
   }
 
+  // ============ /mkt/send-task：「批量创建失败补发任务」弹窗汇总 ============
+  // 弹窗里列的是「提交失败 / 发送失败」明细，没有合计 → 表格下方补一条汇总条
+  const RESEND_PATH_KEYWORD = '/mkt/send-task';
+  const RESEND_DIALOG_TITLE = '批量创建失败补发任务';
+  const RESEND_BAR_ID = 'gavin-resend-summary';
+  const RESEND_THROTTLE_MS = 200;
+  const rlog = (...a) =>
+    console.log('%c[补发汇总]', 'color:#009688;font-weight:bold', ...a);
+
+  function onResendPage() {
+    return (
+      location.pathname.includes(RESEND_PATH_KEYWORD) ||
+      location.hash.includes(RESEND_PATH_KEYWORD)
+    );
+  }
+
+  // 找当前可见的补发弹窗（同名弹窗只认可见的那个）
+  function findResendDialog() {
+    for (const d of document.querySelectorAll('.el-dialog')) {
+      if (d.getBoundingClientRect().width <= 0) continue;
+      const t = d.querySelector('.el-dialog__title');
+      if (t && t.textContent.includes(RESEND_DIALOG_TITLE)) return d;
+    }
+    return null;
+  }
+
+  // "1,234" / "8" / "" → 数字（空值按 0 计）
+  function parseResendNum(text) {
+    const s = String(text == null ? '' : text).replace(/[^\d.\-]/g, '');
+    if (!s || s === '-' || s === '.') return 0;
+    const v = Number(s);
+    return Number.isFinite(v) ? v : 0;
+  }
+
+  // 从弹窗表格取值求和（列位置按表头文字定位，站点调列顺序也不会错）
+  function computeResend(dlg) {
+    const table = dlg.querySelector('.el-table');
+    if (!table) return null;
+    const heads = [...table.querySelectorAll('.el-table__header-wrapper thead th')]
+      .map((th) => th.innerText.trim());
+    const iSend = heads.indexOf('发送失败');
+    const iSub = heads.indexOf('提交失败');
+    if (iSend < 0) return null; // 表头还没渲染 / 不是这个弹窗
+
+    let send = 0;
+    let sub = 0;
+    let rows = 0;
+    for (const tr of table.querySelectorAll('.el-table__body-wrapper tbody tr')) {
+      const tds = tr.querySelectorAll('td');
+      if (!tds.length || iSend >= tds.length) continue;
+      send += parseResendNum(tds[iSend].innerText);
+      if (iSub >= 0 && iSub < tds.length) sub += parseResendNum(tds[iSub].innerText);
+      rows++;
+    }
+    return { table, rows, sub, send, hasSub: iSub >= 0 };
+  }
+
+  function makeResendBar() {
+    const bar = document.createElement('div');
+    bar.id = RESEND_BAR_ID;
+    bar.style.cssText =
+      'display:flex;align-items:center;gap:18px;margin-top:8px;padding:8px 12px;' +
+      'background:#f5f7fa;border:1px solid #ebeef5;border-radius:4px;' +
+      'font-size:13px;color:#606266;line-height:1.5;';
+    return bar;
+  }
+
+  function renderResendSummary(data) {
+    const { table, rows, sub, send, hasSub } = data;
+    const fmtN = (n) => n.toLocaleString('en-US');
+    let bar = document.getElementById(RESEND_BAR_ID);
+    // 表格换了（重新打开弹窗）或位置不对 → 重建并紧贴表格下方
+    if (!bar || bar.previousElementSibling !== table) {
+      if (bar) bar.remove();
+      bar = makeResendBar();
+      if (table.nextSibling) table.parentElement.insertBefore(bar, table.nextSibling);
+      else table.parentElement.appendChild(bar);
+    }
+    const html =
+      '<span>合计 <b style="color:#303133;font-size:14px">' + fmtN(rows) + '</b> 个任务</span>' +
+      (hasSub
+        ? '<span>提交失败 <b style="color:#303133">' + fmtN(sub) + '</b></span>'
+        : '') +
+      '<span>发送失败 <b style="color:#f56c6c;font-size:15px">' + fmtN(send) + '</b></span>' +
+      (rows ? '' : '<span style="color:#909399">当前没有可补发的任务</span>');
+    if (bar.__sig !== html) {
+      bar.innerHTML = html;
+      bar.__sig = html;
+    }
+  }
+
+  let resendLastSig = '';
+
+  function refreshResendSummary() {
+    if (!onResendPage()) return;
+    const dlg = findResendDialog();
+    if (!dlg) {
+      resendLastSig = ''; // 弹窗关闭，允许下次重算
+      return;
+    }
+    const data = computeResend(dlg);
+    if (!data) return;
+    const sig = data.rows + '|' + data.sub + '|' + data.send + '|' + (data.hasSub ? 1 : 0);
+    if (sig === resendLastSig && document.getElementById(RESEND_BAR_ID)) return;
+    resendLastSig = sig;
+    renderResendSummary(data);
+    rlog('汇总：' + data.rows + ' 个任务，提交失败 ' + data.sub + '，发送失败 ' + data.send);
+  }
+
+  // 弹窗内数字异步渲染 / 勾选数变化 → 节流重算
+  let resendTimer = null;
+  function scheduleResendSummary() {
+    if (resendTimer) return;
+    resendTimer = setTimeout(() => {
+      resendTimer = null;
+      refreshResendSummary();
+    }, RESEND_THROTTLE_MS);
+  }
+
   // 诊断日志（10 秒最多一次，避免刷屏）
   let lastDiag = 0;
   function diag() {
@@ -1772,6 +1891,7 @@
   // SPA 路由切换 / 表格重渲染兜底轮询（站点重渲染筛选栏后自动补插）
   setInterval(tryInsert, 1500);
   setInterval(tryInsertReport, 1500);
+  setInterval(refreshResendSummary, 1500); // 补发弹窗兜底刷新（仅 /mkt/send-task 生效）
 
   // 后台保鲜：每 60 秒静默更新一次（先渲染缓存、再拉最新，不打断阅读）
   setInterval(() => {
@@ -1798,6 +1918,18 @@
     });
     tryInsert();
     tryInsertReport();
+
+    // 补发弹窗汇总：只在 /mkt/send-task 挂观察器
+    if (onResendPage()) {
+      new MutationObserver(scheduleResendSummary).observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+      refreshResendSummary();
+      rlog('已加载：打开「批量补发失败」弹窗后会在表格下方显示汇总');
+    }
+
     loadConfig(); // 异步拉取业务配置，成功后自动刷新按钮
     if (onReportPage()) {
       fetchAllPorts().catch(() => {}); // 提前预取端口数据，与页面渲染并行
@@ -1809,5 +1941,5 @@
     start();
   }
 
-  log('v1.11.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.15.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();

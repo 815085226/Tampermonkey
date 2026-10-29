@@ -7,3 +7,6 @@
 
 # 调试抓取产物（含业务数据）
 sms62/tools/inspect-out/
+
+# 本地工作记录
+.workbuddy/
