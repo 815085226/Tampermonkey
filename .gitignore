@@ -1,1 +1,9 @@
 .DS_Store
+
+# 调试用浏览器 profile（含登录态，勿提交）
+.pw-profile/
+.chrome-debug-profile/
+.pw-shot*.png
+
+# 调试抓取产物（含业务数据）
+sms62/tools/inspect-out/
