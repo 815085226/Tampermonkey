@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.3.5
-// @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 国家/企业/用户/供应商 汇总导出 XLSX（企业列与小计列按客户合并单元格），单价从 /user-products 匹配或按 费用÷成功条数 推导
+// @version      0.5.0
+// @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 业务时间/国家/企业/用户/供应商 汇总导出 XLSX（企业列与小计列按客户合并单元格），单价从 /user-products 匹配或按 费用÷成功条数 推导；企业/用户名称从列表接口与页面筛选下拉框双向兜底解析，供应商从通道列表 providerName 或通道名解析
 // @author       Gavin
 // @match        http://adm.linsms.com/*
 // @match        https://adm.linsms.com/*
@@ -21,9 +21,15 @@
 
   // 报表记录字段候选（按顺序取第一个非空值）
   const COUNTRY_KEYS = ['country', 'countryCode', 'countryName', 'nation', 'countryCn', 'countryChineseName'];
-  const ENTERPRISE_KEYS = ['enterprise', 'enterpriseName', 'company', 'companyName', 'customer', 'customerName', 'client', 'clientName', 'customName'];
-  const USER_KEYS = ['userName', 'username', 'userAccount', 'account', 'accountName', 'accountNo', 'loginName'];
-  const CHANNEL_KEYS = ['supplier', 'supplierName', 'channel', 'channelName', 'channelCode', 'channelGroup', 'channelGroupName', 'supplierChannelName', 'productName', 'route', 'routeName', 'gateway', 'gatewayName'];
+  // 业务时间：报表记录自带 reportDate + businessTimezone（对应页面「日期 / 时区」两列）
+  const DATE_KEYS = ['reportDate', 'businessDate', 'statDate', 'reportDay', 'bizDate', 'date', 'day'];
+  const TZ_KEYS = ['businessTimezone', 'businessTimeZone', 'timezone', 'timeZone', 'zone'];
+  const ENTERPRISE_KEYS = ['enterprise', 'enterpriseName', 'company', 'companyName', 'customer', 'customerName', 'client', 'clientName', 'customName', 'entName'];
+  const USER_KEYS = ['userName', 'username', 'userAccount', 'account', 'accountName', 'accountNo', 'loginName', 'user', 'nickName', 'nickname', 'realName', 'displayName'];
+  // 通道名候选（supplier/supplierName 属于「供应商」维度，见 PROVIDER_KEYS，不放这里）
+  const CHANNEL_KEYS = ['channel', 'channelName', 'channelCode', 'channelGroup', 'channelGroupName', 'supplierChannelName', 'productName', 'route', 'routeName', 'gateway', 'gatewayName'];
+  // 供应商候选：记录自带字段 → 通道列表 providerName → 通道名解析
+  const PROVIDER_KEYS = ['providerName', 'provider', 'supplier', 'supplierName', 'vendor', 'vendorName', 'channelProvider', 'channelProviderName'];
   const COUNT_KEYS = ['billingCount', 'billedCount', 'chargeCount', 'feeCount', 'billingNum', 'billCount', 'sendMessageCount', 'sendCount', 'submitCount', 'submit', 'submitted', 'submitNum', 'totalSubmit', 'submitTotal', 'totalCount', 'messageCount', 'smsCount', 'delivered', 'deliveredCount', 'successCount', 'count', 'num', 'quantity', 'total'];
   // 成功条数（页面"成功"列）——实测计费口径=成功条数（费用=成功×单价 精确成立）
   const SUCCESS_KEYS = ['submitSuccess', 'successCount', 'success', 'successNum', 'successTotal', 'sendSuccessCount', 'succCount', 'succeedCount', 'successSubmitCount', 'submitSuccessCount', 'okCount', 'sucCount', 'succNum', 'successCnt', 'successMsgCount', 'validCount', 'sendedSuccess'];
@@ -91,9 +97,10 @@
   const prodNameById = new Map();     // productId -> 产品名
   const channelNameById = new Map();  // channelId -> 通道名
   const channelProviderById = new Map(); // channelId -> 供应商名（providerName）
+  let learnedAuth = '';                  // 从页面请求里学到的 Authorization（不带 Bearer 前缀）
 
   /* ---------------- 工具函数 ---------------- */
-  const norm = (v) => (v == null ? '' : String(v).trim());
+  const norm = (v) => (v == null || typeof v === 'object' ? '' : String(v).trim());
   const normLow = (v) => norm(v).toLowerCase();
 
   function toNum(v) {
@@ -112,6 +119,44 @@
       if (v !== undefined && v !== null && v !== '') return v;
     }
     return undefined;
+  }
+
+  // 按正则匹配 key 取值：接口字段常带前缀（enterpriseUserName / entShortName …），
+  // 枚举候选容易漏，正则兜底。只取标量值，对象/数组跳过
+  function pickRe(obj, re) {
+    if (!obj || typeof obj !== 'object') return undefined;
+    for (const k in obj) {
+      if (!re.test(k)) continue;
+      const v = obj[k];
+      if (v == null || v === '' || typeof v === 'object') continue;
+      return v;
+    }
+    return undefined;
+  }
+
+  // 记录里的嵌套引用对象（如 enterpriseUser: { id: 16, userName: 'CL-MC-103' }）
+  // 是页面「名称 + ID」渲染的数据源，按父字段名归入对应映射
+  function absorbNestedRefs(rec) {
+    if (!rec || typeof rec !== 'object') return 0;
+    let hit = 0;
+    for (const k in rec) {
+      const v = rec[k];
+      if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+      const name = norm(pick(v, ['name', 'userName', 'username', 'nickName', 'nickname', 'enterpriseName',
+        'companyName', 'channelName', 'shortName', 'fullName', 'title', 'label']));
+      const id = norm(v.id ?? v.enterpriseId ?? v.enterpriseUserId ?? v.userId ?? v.channelId);
+      if (!name || !id || name === id) continue;
+      const lk = k.toLowerCase();
+      if (/^(enterprise)?user$/.test(lk) || /^(enterprise)?user_(name|id)$/.test(lk)) { userNameById.set(id, name); hit++; }
+      else if (/^(enterprise|company|customer|client)$/.test(lk)) { entNameById.set(id, name); hit++; }
+      else if (/^channel$/.test(lk)) {
+        channelNameById.set(id, name);
+        const prov = norm(pick(v, ['providerName', 'supplierName', 'provider']));
+        if (prov) channelProviderById.set(id, prov);
+        hit++;
+      }
+    }
+    return hit;
   }
 
   // 递归遍历 JSON 中所有数组元素对象
@@ -200,8 +245,9 @@
   }
 
   function absorbReportRecord(rec) {
-    // 形状要求：有通道（名称或 productId）+ 计费条数为数字（可为 0）
-    const channel = norm(pick(rec, CHANNEL_KEYS)) || norm(rec.productId);
+    // 形状要求：有通道（名称/通道ID/产品ID/供应商任一）+ 计费条数为数字（可为 0）
+    const channel = norm(pick(rec, CHANNEL_KEYS)) || norm(rec.productId) || norm(rec.channelId)
+      || norm(pick(rec, PROVIDER_KEYS));
     const count = toNum(pick(rec, COUNT_KEYS));
     if (norm(channel) === '' || isNaN(count)) return false;
     const user = norm(pick(rec, USER_KEYS)) || norm(rec.enterpriseUserId ?? rec.userId);
@@ -215,21 +261,25 @@
   }
 
   // 从基础数据列表接口吸收 id→名称 映射。
-  // 列表记录多用通用 name 字段，按接口 URL 定向归入对应映射，避免张冠李戴
+  // 列表记录多用通用 name 字段，按接口 URL 定向归入对应映射，避免张冠李戴。
+  // 顺序要求：enterprise-users 必须先判（URL 同时含 enterprise 与 user）
+  const NAME_OF = ['name', 'label', 'title', 'text'];
   function absorbIdNameRecord(rec, url) {
     url = url || '';
     let hit = false;
     const id = norm(rec.id);
-    const name = norm(pick(rec, ['name']));
+    const name = norm(pick(rec, NAME_OF));
 
-    if (/enterprise-users/i.test(url)) {
-      const uName = norm(pick(rec, USER_KEYS)) || name;
+    if (/enterprise-?users?/i.test(url)) {
+      const uName = norm(pick(rec, USER_KEYS)) || name
+        || norm(pickRe(rec, /^(enterprise)?user_?(name|account)$|^user_?nick/i));
       const uid = norm(rec.enterpriseUserId) || norm(rec.userId) || id;
-      if (uName && uid && /^\d+$/.test(uid)) { userNameById.set(uid, uName); hit = true; }
+      if (uName && uid) { userNameById.set(uid, uName); hit = true; }
       return hit;
     }
-    if (/enterprises/i.test(url)) {
-      const eName = norm(pick(rec, ['enterpriseName', 'enterprise', 'companyName', 'company', 'fullName', 'nickName'])) || name;
+    if (/enterprises?/i.test(url)) {
+      const eName = norm(pick(rec, ['enterpriseName', 'enterprise', 'companyName', 'company', 'fullName', 'nickName', 'shortName', 'entName'])) || name
+        || norm(pickRe(rec, /^(enterprise|company|ent)_?(name|title)$/i));
       const eid = norm(rec.enterpriseId) || id;
       if (eName && eid) { entNameById.set(eid, eName); hit = true; }
       return hit;
@@ -241,16 +291,16 @@
       return hit;
     }
     if (/channel/i.test(url)) {
-      const cName = norm(pick(rec, ['channelName', 'channelGroupName'])) || name;
+      const cName = norm(pick(rec, ['channelName', 'channelGroupName', 'name'])) || name;
       const cid = norm(rec.channelId) || id;
       if (cName && cid) { channelNameById.set(cid, cName); hit = true; }
-      const provName = norm(pick(rec, ['providerName']));
+      const provName = norm(pickRe(rec, /^(provider|supplier|vendor)_?(name)?$|^channel_?provider/i));
       if (provName && cid) { channelProviderById.set(cid, provName); hit = true; }
       return hit;
     }
 
     // 非 URL 命中时按显式名称字段兜底
-    const entName = norm(pick(rec, ['enterpriseName']));
+    const entName = norm(pick(rec, ENTERPRISE_KEYS));
     if (entName) {
       const eid = norm(rec.enterpriseId) || id;
       if (eid) { entNameById.set(eid, entName); hit = true; }
@@ -258,7 +308,7 @@
     const uName = norm(pick(rec, USER_KEYS));
     if (uName) {
       const uid = norm(rec.enterpriseUserId) || norm(rec.userId) || id;
-      if (uid && /^\d+$/.test(uid)) { userNameById.set(uid, uName); hit = true; }
+      if (uid) { userNameById.set(uid, uName); hit = true; }
     }
     const pName = norm(pick(rec, ['productName']));
     if (pName) {
@@ -268,13 +318,118 @@
     return hit;
   }
 
+  /* ---------------- 兜底：从页面筛选下拉框读取 id→名称 ---------------- */
+  // 报表页的 企业/企业用户/用户/产品/通道 下拉框 option 的 value 就是 ID、text 就是名称，
+  // 报表接口本身不一定带名称，这里直接复用页面已经加载好的选项，零额外请求
+  function selectLabelText(sel) {
+    let node = sel;
+    for (let d = 0; d < 4 && node && node !== document.body; d++) {
+      let prev = node.previousElementSibling;
+      for (let g = 0; prev && g < 3; g++) {
+        const t = (prev.textContent || '').trim();
+        if (t && t.length <= 10) return t;
+        prev = prev.previousElementSibling;
+      }
+      node = node.parentElement;
+    }
+    return '';
+  }
+
+  function classifySelect(sel) {
+    const first = sel.options && sel.options[0] ? (sel.options[0].textContent || '').trim() : '';
+    const hay = (first + ' ' + selectLabelText(sel)).replace(/\s/g, '');
+    if (/通道/.test(hay)) return 'channel';
+    if (/企业用户/.test(hay)) return 'user';
+    if (/产品/.test(hay)) return 'product';
+    if (/企业/.test(hay)) return 'enterprise';
+    if (/用户/.test(hay)) return 'user';
+    return '';
+  }
+
+  function syncMapsFromSelects() {
+    if (!isReportPage() || typeof document === 'undefined') return 0;
+    let added = 0;
+    for (const sel of document.querySelectorAll('select')) {
+      const kind = classifySelect(sel);
+      if (!kind) continue;
+      const map = kind === 'enterprise' ? entNameById
+        : kind === 'user' ? userNameById
+          : kind === 'channel' ? channelNameById : prodNameById;
+      for (const opt of sel.options) {
+        const id = norm(opt.value);
+        const name = norm(opt.textContent);
+        if (!id || !name || id === name) continue;
+        if (/^(全部|请选择|--|—|无)/.test(name)) continue;
+        if (map.get(id) !== name) { map.set(id, name); added++; }
+      }
+    }
+    if (added > 0) log('从页面下拉框补充名称映射', added, '条', `（企业 ${entNameById.size} / 用户 ${userNameById.size} / 通道 ${channelNameById.size}）`);
+    return added;
+  }
+
+  // 通道名形如 "CG—Brazil—BytePlus—8cb620fd"：第 3 段即供应商，末段是哈希。
+  // 只有第 2 段能识别成国家时才解析，避免把无关字符串（如用户账号）猜成供应商
+  const HASH_RE = /^[0-9a-f]{6,}$/i;
+  function providerFromChannelName(ch) {
+    const parts = norm(ch).split(/[—–\-_]+/).map((s) => s.trim()).filter(Boolean);
+    if (parts.length < 3) return '';
+    if (!ISO2_NAME[toIso2(parts[1])]) return '';
+    const cand = parts[2];
+    if (!cand || HASH_RE.test(cand)) return '';
+    return cand;
+  }
+
+  /* ---------------- 兜底：导出前主动补拉名称列表 ---------------- */
+  // 报表接口 user-daily 只返回 ID（enterpriseId / enterpriseUserId / channelId …），
+  // 名称全在 4 个基础列表接口里，而它们只在页面加载时请求一次。
+  // 脚本若晚一步挂钩就永远抓不到 → 导出一会儿全名一会儿全是数字（实测根因）。
+  // 这里在导出前主动拉一遍，彻底摆脱时序依赖
+  const NAME_LIST_APIS = [
+    '/api/v1/admin/enterprises',
+    '/api/v1/admin/enterprise-users',
+    '/api/v1/admin/channels',
+    '/api/v1/admin/products',
+  ];
+  let nameListsLoaded = false;
+
+  function authToken() {
+    try {
+      const t = PAGE.localStorage && PAGE.localStorage.getItem('admin_token');
+      if (t) return String(t);
+    } catch (e) { /* ignore */ }
+    return learnedAuth || '';
+  }
+
+  async function ensureNameLists() {
+    if (nameListsLoaded) return;
+    nameListsLoaded = true;
+    const token = authToken();
+    const headers = token ? { authorization: /^bearer/i.test(token) ? token : `Bearer ${token}` } : {};
+    let got = 0;
+    for (const api of NAME_LIST_APIS) {
+      try {
+        const res = await PAGE.fetch(api, { headers });
+        if (!res || !res.ok) { dwarn('名称列表拉取失败', api, res && res.status); continue; }
+        const data = await res.json();
+        walkRecords(data, (rec) => { if (absorbIdNameRecord(rec, api)) got++; });
+        got += 0;
+      } catch (e) { dwarn('名称列表拉取异常', api, e && e.message); }
+    }
+    log(`主动补拉名称映射 ${got} 条 → 企业 ${entNameById.size} / 用户 ${userNameById.size} / 通道 ${channelNameById.size} / 供应商 ${channelProviderById.size}`);
+  }
+
   function handleJson(url, data) {
     if (DEBUG) log('JSON:', url);
 
     // 基础数据 id→名称 映射：任何页面都吸收
     let idHit = 0;
-    walkRecords(data, (rec) => { if (absorbIdNameRecord(rec, url)) idHit++; });
-    if (idHit > 0 && DEBUG) log(`捕获名称映射 ${idHit} 条（企业 ${entNameById.size} / 用户 ${userNameById.size} / 产品 ${prodNameById.size}）`);
+    walkRecords(data, (rec) => {
+      // 报表数据自身的记录不做名称映射（其 name 类字段未必是账号名），
+      // 嵌套引用对象任何接口都吸收（页面「名称+ID」两行渲染的数据源）
+      if (!/user-daily|country-daily/i.test(url) && absorbIdNameRecord(rec, url)) idHit++;
+      idHit += absorbNestedRefs(rec);
+    });
+    if (idHit > 0 && DEBUG) log(`捕获名称映射 ${idHit} 条（企业 ${entNameById.size} / 用户 ${userNameById.size} / 产品 ${prodNameById.size} / 通道 ${channelNameById.size} / 供应商 ${channelProviderById.size}）`);
 
     // user-products 单价：任何页面都吸收（含兜底接口）
     let priceHit = 0;
@@ -318,7 +473,14 @@
       this.__linsmsUrl = url;
       return origOpen.call(this, method, url, ...rest);
     };
-    const origSend = XMLHttpRequest.prototype.send;
+    // 顺手学一份 Authorization，用于导出前主动补拉名称列表
+    const origSetHeader = XHR.prototype.setRequestHeader;
+    XHR.prototype.setRequestHeader = function (k, v) {
+      if (v && /^authorization$/i.test(String(k))) learnedAuth = String(v).replace(/^Bearer\s+/i, '');
+      return origSetHeader.call(this, k, v);
+    };
+    // 始终用 PAGE 上的原型取原始方法，避免沙箱副本与页面对象不一致
+    const origSend = XHR.prototype.send;
     XHR.prototype.send = function (...args) {
       this.addEventListener('load', function () {
         const url = this.__linsmsUrl || '';
@@ -333,6 +495,15 @@
   function hookFetch() {
     const origFetch = PAGE.fetch;
     PAGE.fetch = async function (...args) {
+      try {
+        const h = args[1] && args[1].headers;
+        if (h) {
+          const a = h instanceof Headers ? h.get('authorization')
+            : Array.isArray(h) ? (h.find((x) => /^authorization$/i.test(x[0] || '')) || [])[1]
+              : (h.authorization || h.Authorization);
+          if (a) learnedAuth = String(a).replace(/^Bearer\s+/i, '');
+        }
+      } catch (e) { /* ignore */ }
       const res = await origFetch.apply(PAGE, args);
       try {
         const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
@@ -384,20 +555,57 @@
     return '';
   }
 
-  // 报表记录 → 展示维度（ID 经映射翻译为名称，翻译不了保留原值）
+  // 报表记录 → 展示维度（ID 经映射翻译为名称，翻译不了保留原值）。
+  // 兼容三种形态：扁平字段（enterpriseUserName）、嵌套对象（enterpriseUser:{id,userName}）、仅有 ID
+  const nestedObj = (rec, key) => {
+    const v = rec && rec[key];
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+  };
+
+  function resolveEnterprise(rec) {
+    const nested = nestedObj(rec, 'enterprise');
+    const eid = norm(rec.enterpriseId) || norm(rec.entId)
+      || (nested ? norm(nested.id ?? nested.enterpriseId) : '');
+    const name = norm(pick(rec, ENTERPRISE_KEYS))
+      || norm(pickRe(rec, /^(enterprise|company|ent)_?(name|title)$/i))
+      || (nested ? norm(pick(nested, ['name', 'enterpriseName', 'companyName'])) : '');
+    return name || entNameById.get(eid) || eid;
+  }
+
+  function resolveUser(rec) {
+    const nested = nestedObj(rec, 'enterpriseUser');
+    const uid = norm(rec.enterpriseUserId) || norm(rec.userId)
+      || (nested ? norm(nested.id ?? nested.enterpriseUserId ?? nested.userId) : '');
+    const name = norm(pick(rec, USER_KEYS))
+      || norm(pickRe(rec, /^(enterprise)?user_?(name|account)$|^user_?nick|^account_?name$/i))
+      || (nested ? norm(pick(nested, USER_KEYS)) || norm(pick(nested, ['name'])) : '');
+    return name || userNameById.get(uid) || uid;
+  }
+
+  // 供应商：记录自带字段 → 通道列表 providerName → 通道名解析（第 3 段）
+  function getProvider(rec, channel) {
+    const own = norm(pick(rec, PROVIDER_KEYS))
+      || norm(pickRe(rec, /^(provider|supplier|vendor)_?(name)?$|^channel_?provider/i));
+    if (own) return own;
+    const cid = norm(rec.channelId);
+    if (cid && channelProviderById.has(cid)) return channelProviderById.get(cid);
+    const chName = norm(channel) || (cid ? norm(channelNameById.get(cid)) : '');
+    return providerFromChannelName(chName);
+  }
+
   function resolveRow(rec) {
-    const enterprise = norm(pick(rec, ENTERPRISE_KEYS))
-      || entNameById.get(norm(rec.enterpriseId))
-      || norm(rec.enterpriseId);
-    const user = norm(pick(rec, USER_KEYS))
-      || userNameById.get(norm(rec.enterpriseUserId ?? rec.userId))
-      || norm(rec.enterpriseUserId ?? rec.userId);
+    const enterprise = resolveEnterprise(rec);
+    const user = resolveUser(rec);
     const channel = getChannel(rec);
     const country = getCountry(rec, channel);
     const count = toNum(pick(rec, COUNT_KEYS)) || 0; // 提交条数
     const success = toNum(pick(rec, SUCCESS_KEYS)) || 0; // 成功条数
-    const provider = channelProviderById.get(norm(rec.channelId)) || '';
-    return { country, enterprise, user, channel, provider, count, success };
+    const provider = getProvider(rec, channel);
+    // 业务时间 = 业务日期 + 时区，如 "2026-10-30 (Asia/Shanghai)"
+    const date = norm(pick(rec, DATE_KEYS));
+    const tz = norm(pick(rec, TZ_KEYS));
+    const bizTime = date && tz ? `${date} (${tz})` : (date || tz);
+    return { country, enterprise, user, channel, provider, bizTime, count, success };
   }
 
   /* ---------------- 报表生成与 XLSX 导出 ---------------- */
@@ -409,7 +617,12 @@
     log('生成流程开始，内存记录', reportRows.length, '条');
     if (!reportRows.length) { alert('尚未捕获到报表数据，请先在页面完成查询'); return; }
 
-    // 分组：国家 | 企业 | 用户 | 通道
+    // 报表数据只有 ID，导出前先把名称列表补齐（异步，失败不影响条数金额）
+    await ensureNameLists();
+    syncMapsFromSelects();
+    log(`名称映射：企业 ${entNameById.size} / 用户 ${userNameById.size} / 通道 ${channelNameById.size} / 供应商 ${channelProviderById.size}`);
+
+    // 分组：业务时间 | 企业 | 用户 | 供应商
     const groups = new Map();
     for (const rec of reportRows) {
       const r = resolveRow(rec);
@@ -417,6 +630,7 @@
       const enterprise = r.enterprise;
       const user = r.user;
       const provider = r.provider;
+      const bizTime = r.bizTime;
       const count = r.count;
       const success = r.success;
       const fee = toNum(pick(rec, FEE_KEYS)) || 0;
@@ -427,9 +641,11 @@
         if (!isNaN(own)) price = own;
       }
 
-      // 分组：用户+供应商——相同用户、相同供应商的数据求和后只展示一条
-      const key = `${user}\u0001${provider}`;
-      const g = groups.get(key) || { country, enterprise, user, provider, count: 0, success: 0, fee: 0, price: null };
+      // 分组：业务时间+企业+用户+供应商——同一业务日、同一企业下相同用户、相同供应商的数据求和后只展示一条。
+      // 企业必须参与分组键：否则用户为空（或同名用户跨企业）时会把不同客户的数据并成一行，
+      // 企业列只剩第一条的值，数据对不上账；业务时间参与分组，跨日查询时不会把不同日期合并
+      const key = `${bizTime}\u0001${enterprise}\u0001${user}\u0001${provider}`;
+      const g = groups.get(key) || { country, enterprise, user, provider, bizTime, count: 0, success: 0, fee: 0, price: null };
       g.count += count;
       g.success += success;
       g.fee += fee;
@@ -437,10 +653,20 @@
       groups.set(key, g);
     }
 
-    // 排序：企业（客户）优先 → 用户 → 供应商，便于按客户小计
+    // 排序：业务时间 → 企业（客户）→ 用户 → 供应商，便于按客户小计
     const rows = [...groups.values()].sort((a, b) =>
-      a.enterprise.localeCompare(b.enterprise) || a.user.localeCompare(b.user) ||
-      a.provider.localeCompare(b.provider));
+      a.bizTime.localeCompare(b.bizTime) || a.enterprise.localeCompare(b.enterprise) ||
+      a.user.localeCompare(b.user) || a.provider.localeCompare(b.provider));
+
+    // 未解析成名称（仍是纯数字 ID / 供应商为空）的组，导出前给一条提醒
+    const idLike = (v) => /^\d+$/.test(v);
+    const badUser = rows.filter((r) => idLike(r.user)).length;
+    const badEnt = rows.filter((r) => idLike(r.enterprise)).length;
+    const noProv = rows.filter((r) => !r.provider).length;
+    if (badUser || badEnt || noProv) {
+      dwarn(`名称未解析：用户 ${badUser} 组、企业 ${badEnt} 组仍是 ID；供应商缺失 ${noProv} 组。`
+        + ' 控制台执行 __linsmsReportDebug() 可查看字段名与映射表规模');
+    }
 
     // 单价缺失时按 费用÷计费基础 推导；实测计费基础=成功条数（费用=成功×单价 精确成立），
     // 成功条数缺失时退回 提交条数
@@ -469,7 +695,9 @@
 
     // XLSX 导出：企业列与小计列按客户纵向合并单元格（小计=客户金额合计）
     if (typeof XLSX === 'undefined') { alert('XLSX 库未加载（检查 @require CDN），无法导出'); return; }
-    const aoa = [['国家', '企业', '用户', '供应商', '提交条数', '成功条数', '单价', '金额', '小计']];
+    // 列序：国家 企业 用户 供应商 业务时间 提交条数 成功条数 单价 金额 小计（小计=第 9 列，0 基）
+    const SUBTOTAL_COL = 9;
+    const aoa = [['国家', '企业', '用户', '供应商', '业务时间', '提交条数', '成功条数', '单价', '金额', '小计']];
     const merges = [];
     let rowIdx = 1;
     let curEnt = null, blockStart = 0, entAmount = 0;
@@ -478,9 +706,9 @@
         if (curEnt !== null) {
           if (rowIdx - blockStart > 1) {
             merges.push({ s: { r: blockStart, c: 1 }, e: { r: rowIdx - 1, c: 1 } }); // 企业列合并
-            merges.push({ s: { r: blockStart, c: 8 }, e: { r: rowIdx - 1, c: 8 } }); // 小计列合并
+            merges.push({ s: { r: blockStart, c: SUBTOTAL_COL }, e: { r: rowIdx - 1, c: SUBTOTAL_COL } }); // 小计列合并
           }
-          aoa[blockStart][8] = t6(entAmount);
+          aoa[blockStart][SUBTOTAL_COL] = t6(entAmount);
         }
         curEnt = r.enterprise;
         blockStart = rowIdx;
@@ -488,7 +716,7 @@
       }
       // 金额严格按系统数据：有费用直接用 estimatedFee，无费用才按 成功条数×单价 计算
       const amount = r.fee > 0 ? t6(r.fee) : (r.price != null ? t6(r.basis * r.price) : null);
-      aoa.push([r.country, r.enterprise, r.user, r.provider, r.count, r.success,
+      aoa.push([r.country, r.enterprise, r.user, r.provider, r.bizTime, r.count, r.success,
         r.price != null ? r.price : '', amount, null]);
       if (amount != null) entAmount += amount;
       rowIdx++;
@@ -496,23 +724,24 @@
     if (curEnt !== null) {
       if (rowIdx - blockStart > 1) {
         merges.push({ s: { r: blockStart, c: 1 }, e: { r: rowIdx - 1, c: 1 } });
-        merges.push({ s: { r: blockStart, c: 8 }, e: { r: rowIdx - 1, c: 8 } });
+        merges.push({ s: { r: blockStart, c: SUBTOTAL_COL }, e: { r: rowIdx - 1, c: SUBTOTAL_COL } });
       }
-      aoa[blockStart][8] = t6(entAmount);
+      aoa[blockStart][SUBTOTAL_COL] = t6(entAmount);
     }
-    aoa.push(['合计', '', '', '', totalCount, totalSuccess, '', t6(totalAmount), t6(totalAmount)]);
+    aoa.push(['合计', '', '', '', '', totalCount, totalSuccess, '', t6(totalAmount), t6(totalAmount)]);
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     // 单价/金额/小计三列统一 6 位小数显示格式
     const range = XLSX.utils.decode_range(ws['!ref']);
     for (let R = 1; R <= range.e.r; R++) {
-      for (let C = 6; C <= 8; C++) {
+      for (let C = 7; C <= SUBTOTAL_COL; C++) {
         const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })];
         if (cell && cell.t === 'n') cell.z = '0.000000';
       }
     }
     ws['!merges'] = merges;
-    ws['!cols'] = [{ wch: 8 }, { wch: 16 }, { wch: 22 }, { wch: 28 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 12 }];
+    ws['!cols'] = [{ wch: 8 }, { wch: 16 }, { wch: 22 }, { wch: 14 }, { wch: 24 },
+      { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 12 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, '生产报表');
     const d = new Date();
@@ -644,15 +873,38 @@
   }
 
   /* ---------------- 启动 ---------------- */
+  // 诊断入口：控制台执行 __linsmsReportDebug() 查看映射表规模 + 首条记录字段
+  function debugDump() {
+    const maps = {
+      企业: entNameById.size, 用户: userNameById.size, 通道: channelNameById.size,
+      供应商: channelProviderById.size, 产品: prodNameById.size, 单价: priceByKey.size,
+    };
+    log('映射表:', maps, '| 报表记录:', reportRows.length);
+    if (reportRows.length) {
+      const rec = reportRows[0];
+      log('首条记录字段:', Object.keys(rec).join(', '));
+      log('首条记录:', JSON.stringify(rec).slice(0, 2000));
+      log('解析结果:', resolveRow(rec));
+    }
+    const selInfo = [...document.querySelectorAll('select')].map((s) => ({
+      label: selectLabelText(s), kind: classifySelect(s), options: s.options.length,
+    }));
+    log('页面下拉框:', selInfo);
+    return { maps, rows: reportRows.length };
+  }
+
+  // 网络钩子必须立即挂：页面的 4 个名称列表接口在应用初始化阶段就发出，
+  // 若等到 DOMContentLoaded 再挂，谁先谁后全看运气（这正是「一会儿正常一会儿全是数字」的来源）
+  try { hookXhr(); hookFetch(); } catch (e) { console.error('[生产报表] 挂钩失败', e); }
+
   function boot() {
-    log('v0.3.5 启动', location.href);
+    log('v0.5.0 启动', location.href);
     loadPriceCache();
-    hookXhr();
-    hookFetch();
+    try { PAGE.__linsmsReportDebug = debugDump; } catch (e) { /* ignore */ }
 
     const mo = new MutationObserver(() => { scheduleSync(); routeWatch(); });
     mo.observe(document.documentElement, { childList: true, subtree: true });
-    setInterval(routeWatch, 1000);
+    setInterval(() => { routeWatch(); syncMapsFromSelects(); }, 1000);
     scheduleSync();
   }
 
