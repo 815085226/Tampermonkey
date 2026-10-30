@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.15.0
-// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行（每次自动筛选前先点页面「重置」清空历史条件）；另在 /mkt/send-task 的「批量创建失败补发任务」弹窗里，表格下方自动显示汇总（任务数 + 提交失败合计 + 发送失败合计）
+// @version      1.16.0
+// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行（每次自动筛选前先点页面「重置」清空历史条件）；L 按钮悬停「换卡推送」批量流程按「状态=套餐用尽 + 套餐<N」逐台设备勾选推送；另在 /mkt/send-task 的「批量创建失败补发任务」弹窗里，表格下方自动显示汇总（任务数 + 提交失败合计 + 发送失败合计）
 // @author       Gavin
 // @match        http://web.sms62.com/*
 // @match        https://web.sms62.com/*
@@ -646,8 +646,8 @@
       PACKAGE_UNIT + ' : 发送总数）' +
       '；「发送总数>' + SEND_TOTAL_THRESHOLD +
       '」为固定阈值统计（不随上方套餐阈值变化）' +
-      '；「换卡推送」批量流程的勾选条件 = 套餐＜' + pkgThreshold +
-      '（跟随上方输入框）' +
+      '；「换卡推送」批量流程的勾选条件 = 状态=' + BATCH_STATUS_FILTER +
+      ' 且 套餐＜' + pkgThreshold + '（阈值跟随上方输入框）' +
       '；点击状态标签可反筛列表；点「发不出去」数字 = 该分组设备 + 封卡类状态 → 查询并勾选满足规则的行（汇总行=不限设备），仅勾当前页；点「刷新报表」强制拉最新';
     wrap.appendChild(foot);
     return wrap;
@@ -1128,7 +1128,10 @@
   }
 
   // ===== 批量推送（换卡）：hover L 按钮下拉触发 =====
-  // 批量条件：设备 = 单台 → 清空「发送总数」→ 查询 → 只勾选「套餐 < 报表阈值」的行
+  // 批量条件：设备 = 单台 → 状态 = 套餐用尽 → 清空「发送总数」→ 查询
+  //          → 只勾选「套餐 < 报表阈值」的行
+  // 状态过滤：只处理「套餐用尽」的端口（筛进查询条件里，服务端过滤，不靠翻页逐条判断）
+  const BATCH_STATUS_FILTER = '套餐用尽';
   // 菜单项 → 弹窗里「推送类型」选项的映射
   const MENU_PUSH_TYPE = {
     '换卡': '换卡',
@@ -1216,8 +1219,9 @@
     const limit = batchPkgLimit();
     for (const el of document.querySelectorAll('[data-gavin-batch-menu="1"]')) {
       el.title =
-        '逐台设备: 筛选设备 → 查询 → 只勾选「套餐<' + limit +
-        '」的端口 → 推送（' + (MENU_PUSH_TYPE[el.dataset.gavinBatchItem] || '') +
+        '逐台设备: 筛选设备 + 状态=' + BATCH_STATUS_FILTER + ' → 查询 → 只勾选「套餐<' +
+        limit + '」的端口 → 推送（' +
+        (MENU_PUSH_TYPE[el.dataset.gavinBatchItem] || '') +
         '）→ 等人工确认（阈值跟随报表头部输入框）';
       el.dataset.gavinBatchLimit = String(limit);
     }
@@ -1271,7 +1275,8 @@
   }
 
   // 只勾选「套餐 < limit」的行，返回勾选到的行数
-  async function selectRowsByPkg(limit) {
+  // statusMust：可选，要求行的「状态」列文本包含该值（双保险：万一下拉筛选没生效也不会勾错）
+  async function selectRowsByPkg(limit, statusMust) {
     const rows = currentQueryRows();
     if (!rows.length) { log('查询结果为空'); return 0; }
 
@@ -1279,6 +1284,12 @@
     if (idx < 0) {
       log('⚠️ 未找到「套餐」列，退化为全选查询结果');
       return (await selectAllQueryRows()) ? currentQueryRows().length : 0;
+    }
+
+    // 状态列：仅在需要二次校验时找（列没显示时跳过校验，不阻断流程）
+    const idxStatus = statusMust ? findColumnIndex(['状态']) : -1;
+    if (statusMust && idxStatus < 0) {
+      log('⚠️ 未找到「状态」列，跳过逐行状态复核（已由状态筛选条件保证）');
     }
 
     // 分页保护提示：当前页未覆盖全部数据时给出警告
@@ -1291,8 +1302,15 @@
 
     await clearRowSelection();
     let picked = 0;
+    let skippedByStatus = 0;
     for (const tr of rows) {
-      const cell = tr.querySelectorAll('td')[idx];
+      const cells = tr.querySelectorAll('td');
+      // 状态必须符合（如「套餐用尽」），否则跳过
+      if (statusMust && idxStatus >= 0) {
+        const st = (cells[idxStatus]?.innerText || '').trim();
+        if (!st.includes(statusMust)) { skippedByStatus++; continue; }
+      }
+      const cell = cells[idx];
       if (!cell) continue;
       // 单元格可能带千分位/单位，取数字比较
       const txt = (cell.innerText || '').replace(/[^\d.\-]/g, '');
@@ -1308,8 +1326,10 @@
     const checked = document.querySelectorAll(
       '.el-table__body-wrapper .el-checkbox__input.is-checked'
     ).length;
-    log('按「套餐<' + limit + '」勾选（套餐列#' + idx + '）：命中 ' + picked +
-      ' 行，当前已选 ' + checked + ' 行');
+    log('按「套餐<' + limit + '」' + (statusMust ? ' + 状态含「' + statusMust + '」' : '') +
+      '勾选（套餐列#' + idx + (idxStatus >= 0 && statusMust ? '，状态列#' + idxStatus : '') +
+      '）：命中 ' + picked + ' 行，当前已选 ' + checked + ' 行' +
+      (skippedByStatus ? '（' + skippedByStatus + ' 行状态不符已跳过）' : ''));
     return checked;
   }
 
@@ -1557,7 +1577,8 @@
     const prog = batchProgress();
     try {
       log('🚀 开始批量' + menuItem + '推送：L ' + groupName + '（' +
-        devices.length + ' 台设备，套餐<' + pkgLimit + '，阈值取自报表头部输入框）');
+        devices.length + ' 台设备，状态=' + BATCH_STATUS_FILTER +
+        '，套餐<' + pkgLimit + '，阈值取自报表头部输入框）');
       for (let i = 0; i < devices.length; i++) {
         if (batchStopFlag) {
           log('🛑 批量任务已终止，剩余 ' + (devices.length - i) + ' 台设备未处理');
@@ -1574,6 +1595,18 @@
         const okDev = await syncDropdown('设备', (t) => t === dev);
         if (!okDev) { log('⚠️ 设备 ' + dev + ' 筛选设置失败，跳过'); continue; }
 
+        // 1.5) 状态筛选 = 套餐用尽（只处理已把套餐发完的端口）
+        prog('📋 批量' + menuItem + '（' + groupName + '）' +
+          (i + 1) + '/' + devices.length + ' — 设备 ' + dev +
+          '：设状态=' + BATCH_STATUS_FILTER + '…');
+        const okStatus = await syncDropdown('状态', (t) => t === BATCH_STATUS_FILTER);
+        if (!okStatus) {
+          log('⚠️ 设备 ' + dev + ': 状态「' + BATCH_STATUS_FILTER +
+            '」筛选设置失败（下拉里没有该选项？），跳过 —— 避免推送非「' +
+            BATCH_STATUS_FILTER + '」的端口');
+          continue;
+        }
+
         // 2) 清空「发送总数」条件（改用套餐阈值筛选，避免残留 >500 之类的旧条件）
         clearSendTotalCondition();
 
@@ -1589,10 +1622,10 @@
         prog('📋 批量' + menuItem + '（' + groupName + '）' +
           (i + 1) + '/' + devices.length + ' — 设备 ' + dev +
           '：勾选「套餐<' + pkgLimit + '」的端口…');
-        const selected = await selectRowsByPkg(pkgLimit);
+        const selected = await selectRowsByPkg(pkgLimit, BATCH_STATUS_FILTER);
         if (!selected) {
-          log('ℹ️ 设备 ' + dev + ': 无「套餐<' + pkgLimit +
-            '」的端口，跳过');
+          log('ℹ️ 设备 ' + dev + ': 无「套餐<' + pkgLimit + ' 且 状态=' +
+            BATCH_STATUS_FILTER + '」的端口，跳过');
           continue;
         }
 
@@ -1696,7 +1729,8 @@
       mi.textContent = item + '推送';
       mi.dataset.gavinBatchMenu = '1';
       mi.dataset.gavinBatchItem = item;
-      mi.title = '逐台设备: 筛选设备 → 查询 → 只勾选「套餐<' + batchPkgLimit() +
+      mi.title = '逐台设备: 筛选设备 + 状态=' + BATCH_STATUS_FILTER +
+        ' → 查询 → 只勾选「套餐<' + batchPkgLimit() +
         '」的端口 → 推送（' + (MENU_PUSH_TYPE[item] || item) +
         '）→ 等人工确认（阈值跟随报表头部输入框）';
       mi.style.cssText =
@@ -1941,5 +1975,5 @@
     start();
   }
 
-  log('v1.15.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.16.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
