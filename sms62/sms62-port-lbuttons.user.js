@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.18.0
+// @version      1.19.0
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行（每次自动筛选前先点页面「重置」清空历史条件）；L 按钮悬停「换卡推送」批量流程按「状态=套餐用尽 + 套餐<N」逐台设备勾选推送（结果超过一页时自动把每页条数调到 200，勾选后逐行复核补勾）；另在 /mkt/send-task 的「批量创建失败补发任务」弹窗里，表格下方自动显示汇总（任务数 + 提交失败合计 + 发送失败合计）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -358,42 +358,63 @@
     );
   }
 
+  // 未在业务配置里分组的设备（如 E1）统一归到这一行
+  const OTHER_GROUP_NAME = '其他';
+
+  const rowDeviceName = (r) => String(r.d ?? r.deviceName ?? '').trim();
+
+  // 单组的统计口径（各组行与「其他」行共用，保证口径一致）
+  function statOf(name, devices, groupRows) {
+    // 套餐 < 阈值 的端口数量（空/无套餐数据不计入）
+    const lowPkg = groupRows.filter((r) => {
+      const raw = r.p ?? r.pkgs;
+      const v = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
+      return Number.isFinite(v) && v < pkgThreshold;
+    }).length;
+    // 发送总数 > 500 的端口数量（固定阈值，与套餐阈值无关）
+    const overSend = groupRows.filter((r) => {
+      const v = Number(r.t ?? r.totalSend);
+      return Number.isFinite(v) && v > SEND_TOTAL_THRESHOLD;
+    }).length;
+    const cantSend = groupRows.filter(isCantSend).length; // 发不出去的卡数
+    const statusMap = {};
+    let pkgSum = 0; // 套餐汇总总数（组内 pkgs 求和）
+    for (const r of groupRows) {
+      const k = statusLabel(r.s ?? r.status);
+      statusMap[k] = (statusMap[k] || 0) + 1;
+      pkgSum += Number(r.p ?? r.pkgs) || 0;
+    }
+    return {
+      name,
+      devices,
+      total: groupRows.length,
+      overSend,
+      lowPkg,
+      cantSend,
+      statusMap,
+      pkgSum,
+    };
+  }
+
   function buildStats(rows) {
     const stats = [];
     for (const [name, devices] of Object.entries(GROUPS_CURRENT)) {
-      const groupRows = rows.filter((r) =>
-        // 兼容两种行结构：接口原始行 / 本地缓存的精简行（d/t/s）
-        matchDevice(String(r.d ?? r.deviceName ?? '').trim(), devices)
+      // 兼容两种行结构：接口原始行 / 本地缓存的精简行（d/t/s）
+      const groupRows = rows.filter((r) => matchDevice(rowDeviceName(r), devices));
+      stats.push(statOf(name, devices, groupRows));
+    }
+
+    // 没被任何分组认领的设备 → 合并成「其他」（保证总数不漏：各分组 + 其他 = 全量）
+    const groupedDevices = Object.values(GROUPS_CURRENT).flat();
+    const restRows = rows.filter((r) => {
+      const d = rowDeviceName(r);
+      return !!d && !matchDevice(d, groupedDevices);
+    });
+    if (restRows.length) {
+      const restDevices = [...new Set(restRows.map(rowDeviceName).filter(Boolean))].sort(
+        (a, b) => a.localeCompare(b, 'zh-CN', { numeric: true })
       );
-      // 套餐 < 阈值 的端口数量（空/无套餐数据不计入）
-      const lowPkg = groupRows.filter((r) => {
-        const raw = r.p ?? r.pkgs;
-        const v = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
-        return Number.isFinite(v) && v < pkgThreshold;
-      }).length;
-      // 发送总数 > 500 的端口数量（固定阈值，与套餐阈值无关）
-      const overSend = groupRows.filter((r) => {
-        const v = Number(r.t ?? r.totalSend);
-        return Number.isFinite(v) && v > SEND_TOTAL_THRESHOLD;
-      }).length;
-      const cantSend = groupRows.filter(isCantSend).length; // 发不出去的卡数
-      const statusMap = {};
-      let pkgSum = 0; // 套餐汇总总数（组内 pkgs 求和）
-      for (const r of groupRows) {
-        const k = statusLabel(r.s ?? r.status);
-        statusMap[k] = (statusMap[k] || 0) + 1;
-        pkgSum += Number(r.p ?? r.pkgs) || 0;
-      }
-      stats.push({
-        name,
-        devices,
-        total: groupRows.length,
-        overSend,
-        lowPkg,
-        cantSend,
-        statusMap,
-        pkgSum,
-      });
+      stats.push(statOf(OTHER_GROUP_NAME, restDevices, restRows));
     }
     return stats;
   }
@@ -475,7 +496,7 @@
       } else {
         for (const [label, count] of entries) {
           statusTd.appendChild(
-            makeStatusChip(label, count, GROUPS_CURRENT[s.name],
+            makeStatusChip(label, count, s.devices,
               'background:#ecf5ff;color:#409eff;')
           );
         }
@@ -488,11 +509,16 @@
       // 组名（加粗）+ 该组对应的设备配置（灰色小字）
       const nameSpan = document.createElement('span');
       nameSpan.textContent = s.name;
+      if (s.name === OTHER_GROUP_NAME) {
+        // 未分组行：用灰色区分，避免误当成配置里的分组
+        nameSpan.style.color = '#909399';
+        nameSpan.title = '这些设备没有出现在业务配置 ' + CONFIG_KEY + ' 的任何分组里';
+      }
       tdName.appendChild(nameSpan);
       const devSpan = document.createElement('span');
       devSpan.style.cssText =
         'margin-left:6px;font-weight:400;font-size:12px;color:#909399;';
-      devSpan.textContent = '(' + s.devices.join('、') + ')';
+      devSpan.textContent = '(' + (s.devices.join('、') || '设备名未知') + ')';
       tdName.appendChild(devSpan);
       const tdTotal = document.createElement('td');
       tdTotal.style.cssText = 'border:1px solid #ebeef5;padding:8px 12px;';
@@ -639,7 +665,8 @@
     const foot = document.createElement('div');
     foot.style.cssText = 'margin-top:8px;font-size:12px;color:#909399;';
     foot.textContent =
-      '统计范围: 全部端口数据（设备归属按业务配置 ' + CONFIG_KEY + ' 划分）' +
+      '统计范围: 全部端口数据（设备归属按业务配置 ' + CONFIG_KEY + ' 划分；' +
+      '没有出现在任何分组里的设备合并为「' + OTHER_GROUP_NAME + '」，各分组+' + OTHER_GROUP_NAME + ' = 全部）' +
       (lastDataTs ? ' · 数据时间 ' + fmtTime(lastDataTs) : '') +
       '；「发不出去」= 封卡类状态 + 充值次数≥' + CANT_SEND_MIN_TOPUP +
       ' + 失败数量≥有效发送数（有效发送数 = 充值次数>1 ? 发送总数-(充值次数-1)×' +
@@ -2156,5 +2183,5 @@
     start();
   }
 
-  log('v1.18.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.19.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
