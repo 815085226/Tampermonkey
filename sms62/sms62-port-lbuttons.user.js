@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.17.0
-// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行（每次自动筛选前先点页面「重置」清空历史条件）；L 按钮悬停「换卡推送」批量流程按「状态=套餐用尽 + 套餐<N」逐台设备勾选推送；另在 /mkt/send-task 的「批量创建失败补发任务」弹窗里，表格下方自动显示汇总（任务数 + 提交失败合计 + 发送失败合计）
+// @version      1.18.0
+// @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行（每次自动筛选前先点页面「重置」清空历史条件）；L 按钮悬停「换卡推送」批量流程按「状态=套餐用尽 + 套餐<N」逐台设备勾选推送（结果超过一页时自动把每页条数调到 200，勾选后逐行复核补勾）；另在 /mkt/send-task 的「批量创建失败补发任务」弹窗里，表格下方自动显示汇总（任务数 + 提交失败合计 + 发送失败合计）
 // @author       Gavin
 // @match        http://web.sms62.com/*
 // @match        https://web.sms62.com/*
@@ -1291,6 +1291,71 @@
     )];
   }
 
+  // 总条数（分页里的 "Total 1200" / "共 1200 条"）
+  function readPageTotal() {
+    const el = document.querySelector('.el-pagination__total');
+    if (el) {
+      const n = (el.innerText || '').replace(/[^\d]/g, '');
+      if (n) return Number(n);
+    }
+    const txt = (document.querySelector('.el-pagination') || {}).innerText || '';
+    const m = txt.match(/(?:Total|共)\s*(\d+)/i);
+    return m ? Number(m[1]) : 0;
+  }
+
+  // 结果超过一页时，把「每页条数」调到最大（站点最多 200）
+  // 站点翻页会清空已勾选行（无 reserve-selection），所以超出部分没法靠翻页补勾，只能把一页撑大
+  async function expandPageSizeIfNeeded() {
+    const total = readPageTotal();
+    let rows = currentQueryRows().length;
+    if (!total || total <= rows) return { total, rows, expanded: false };
+
+    const sel = document.querySelector('.el-pagination .el-select');
+    if (!sel) {
+      log('⚠️ 结果 ' + total + ' 条 > 当前页 ' + rows + ' 条，且未找到每页条数下拉，只能勾当前页');
+      return { total, rows, expanded: false };
+    }
+    const wrap = sel.querySelector('.el-select__wrapper') || sel;
+    document.body.click();
+    await sleep(200);
+    fireClick(wrap);
+    await sleep(450);
+
+    let dd = null;
+    for (const d of document.querySelectorAll('.el-select-dropdown')) {
+      if (d.offsetParent === null) continue;
+      const items = [...d.querySelectorAll('.el-select-dropdown__item')];
+      if (items.some((it) => /\d+\s*\/?\s*(page|条)/i.test(it.textContent))) { dd = d; break; }
+    }
+    if (!dd) {
+      document.body.click();
+      log('⚠️ 未找到每页条数选项，保持当前 ' + rows + ' 条/页');
+      return { total, rows, expanded: false };
+    }
+    const opts = [...dd.querySelectorAll('.el-select-dropdown__item')]
+      .map((it) => {
+        const m = it.textContent.match(/(\d+)/);
+        return { it, size: m ? Number(m[1]) : 0, selected: it.classList.contains('is-selected') };
+      })
+      .filter((o) => o.size > 0);
+    if (!opts.length) {
+      document.body.click();
+      return { total, rows, expanded: false };
+    }
+    const cur = opts.find((o) => o.selected);
+    const max = opts.reduce((a, b) => (b.size > a.size ? b : a), opts[0]);
+    if (cur && cur.size >= max.size) {
+      document.body.click();
+      log('ℹ️ 结果 ' + total + ' 条 > ' + rows + ' 条/页，每页已是最大（' + cur.size + '），只能勾当前页');
+      return { total, rows, expanded: false };
+    }
+    fireClick(max.it);
+    await sleep(2200); // 等按新每页条数重新拉数据
+    rows = currentQueryRows().length;
+    log('ℹ️ 结果 ' + total + ' 条超过一页，已把每页条数调到 ' + max.size + '（当前 ' + rows + ' 行）');
+    return { total, rows, expanded: true };
+  }
+
   // 清空表格已勾选行（表头复选框：全选 → 全不选）
   async function clearRowSelection() {
     if (!document.querySelector('.el-table__body-wrapper .el-checkbox__input.is-checked')) return;
@@ -1372,11 +1437,10 @@
     }
 
     // 分页保护提示：当前页未覆盖全部数据时给出警告
-    const totalTxt = (document.querySelector('.el-pagination__total')?.innerText || '')
-      .replace(/[^\d]/g, '');
-    const totalNum = totalTxt ? Number(totalTxt) : 0;
+    const totalNum = readPageTotal();
     if (totalNum && totalNum > rowsNow().length) {
-      log('⚠️ 当前页仅 ' + rowsNow().length + ' 行（共 ' + totalNum + ' 条），超出部分未参与勾选');
+      log('⚠️ 结果共 ' + totalNum + ' 条，当前页只有 ' + rowsNow().length +
+        ' 行；站点翻页会清空勾选，超出部分勾不到（可把每页调到 200 或收窄条件）');
     }
 
     await clearRowSelection();
@@ -1439,11 +1503,10 @@
       ' 连续失败#' + iFail + ' 状态#' + iStatus);
 
     // 分页保护：当前页未覆盖全部数据时给出警告
-    const totalTxt = (document.querySelector('.el-pagination__total')?.innerText || '')
-      .replace(/[^\d]/g, '');
-    const totalNum = totalTxt ? Number(totalTxt) : 0;
+    const totalNum = readPageTotal();
     if (totalNum && totalNum > rows.length) {
-      log('⚠️ 当前页仅 ' + rows.length + ' 行（共 ' + totalNum + ' 条），超出部分未参与勾选');
+      log('⚠️ 结果共 ' + totalNum + ' 条，当前页只有 ' + rows.length +
+        ' 行；站点翻页会清空勾选，超出部分勾不到（可把每页调到 200 或收窄条件）');
     }
 
     await clearRowSelection();
@@ -1536,6 +1599,9 @@
       clickSearchButton();
       setBtn('勾选中…', true);
       await sleep(2200);
+
+      // 3.1) 结果超过一页时把每页条数撑到最大（翻页会清空勾选，超出部分勾不到）
+      await expandPageSizeIfNeeded();
 
       // 4) 勾选满足规则的行
       const checked = await selectRowsByCantSend();
@@ -1724,6 +1790,9 @@
           break;
         }
 
+        // 3.1) 结果超过一页时把每页条数撑到最大，否则只能勾到第一页（站点翻页会清空勾选）
+        const pageInfo = await expandPageSizeIfNeeded();
+
         // 3.5) 只勾选「套餐 < pkgLimit」的行（推送按钮要求先选中行）
         prog('📋 批量' + menuItem + '（' + groupName + '）' +
           (i + 1) + '/' + devices.length + ' — 设备 ' + dev +
@@ -1733,6 +1802,12 @@
           log('ℹ️ 设备 ' + dev + ': 无「套餐<' + pkgLimit + ' 且 状态=' +
             BATCH_STATUS_FILTER + '」的端口，跳过');
           continue;
+        }
+        // 仍有一页装不下的数据 → 明确提示（超出部分这次没勾，避免误以为已全选）
+        if (pageInfo.total > currentQueryRows().length) {
+          log('⚠️ 设备 ' + dev + ': 查询结果共 ' + pageInfo.total + ' 条，当前页只有 ' +
+            currentQueryRows().length + ' 行；站点翻页会清空勾选，超出部分本次未勾选。' +
+            '建议把每页条数调到 200（装 200page 脚本）或再收窄条件分批处理');
         }
 
         // 4) 点推送
@@ -2081,5 +2156,5 @@
     start();
   }
 
-  log('v1.17.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.18.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
