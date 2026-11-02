@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         sms62 端口页 L1-L5 设备快选按钮
 // @namespace    gavin.sms62
-// @version      1.16.0
+// @version      1.17.0
 // @description  在 http://web.sms62.com/mkt/port 的"合伙人"后面增加 L 设备组按钮（组名从业务配置 LOCATION:DEVICES:CONFIG 动态获取，新增组自动出现），一键把"设备"筛选条件设为对应设备组；并在筛选栏与列表之间增加可折叠的 L 组数据报表（发送总数>500 数量 + 套餐<1000 数量 + 发不出去数量 + 各状态分布）；「发不出去」数字可点击 → 设备组 + 封卡类状态筛选并勾选满足规则的行（每次自动筛选前先点页面「重置」清空历史条件）；L 按钮悬停「换卡推送」批量流程按「状态=套餐用尽 + 套餐<N」逐台设备勾选推送；另在 /mkt/send-task 的「批量创建失败补发任务」弹窗里，表格下方自动显示汇总（任务数 + 提交失败合计 + 发送失败合计）
 // @author       Gavin
 // @match        http://web.sms62.com/*
@@ -969,6 +969,28 @@
     return devices.some((d) => tokens.includes(d));
   }
 
+  // 筛选栏里「状态」的实际 label：站点有时叫「状态」，有时叫「设备状态」
+  function findStatusLabel() {
+    for (const name of ['状态', '设备状态']) {
+      if (findQueryLabel(name)) return name;
+    }
+    return null;
+  }
+  const statusLabelName = () => findStatusLabel() || '状态';
+
+  // 读某个下拉框当前已选内容（如 "D11 ×+2"），用来发现「没清干净」的残留
+  function readSelectValueText(labelText) {
+    const sel = findSelectAfter(labelText);
+    if (!sel) return '';
+    const w = sel.querySelector('.el-select__wrapper') || sel;
+    return (w.innerText || '').replace(/\s+/g, ' ').trim();
+  }
+
+  // 多选被折叠成 "+N" 形式 = 还有其它选中项没清掉
+  function hasCollapsedOverflow(txt) {
+    return /\+\s*\d+/.test(txt || '');
+  }
+
   function clickSearchButton() {
     for (const b of document.querySelectorAll('button')) {
       const t = b.textContent.trim();
@@ -1011,28 +1033,39 @@
     return false;
   }
 
-  // 同步多选下拉的选中项：按 wantFn 选上/取消选项（wantFn: 选项文本 => 是否想要）
+  // 同步下拉的选中项：按 wantFn 选上/取消选项（wantFn: 选项文本 => 是否想要）
+  // 关键：每次点击后都"重新查询"节点 —— 点击会触发 Vue 重渲染，之前缓存的 item 会变成游离节点，
+  //       后续 click 打在游离节点上完全没反应（表现为只改了第一个选项、其余选项清不掉）
   async function syncSelectionBy(dd, wantFn) {
-    for (let pass = 0; pass < 3; pass++) {
-      let changed = false;
-      const items = [...dd.querySelectorAll('.el-select-dropdown__item')];
+    const clicks = Object.create(null);
+    let cur = dd;
+    for (let guard = 0; guard < 400; guard++) {
+      if (!cur || !cur.isConnected) cur = findVisibleOptionHost();
+      if (!cur) return false;
+      const items = [...cur.querySelectorAll('.el-select-dropdown__item')];
+      let target = null;
       for (const it of items) {
         const text = it.textContent.trim();
         const isSel = it.classList.contains('is-selected');
-        const want = wantFn(text);
-        if (want && !isSel) {
-          fireClick(it);
-          changed = true;
-          await sleep(150);
-        } else if (!want && isSel) {
-          fireClick(it); // 取消不想要的已选项
-          changed = true;
-          await sleep(150);
-        }
+        if (!!wantFn(text) !== isSel) { target = { it, text, want: !isSel }; break; }
       }
-      if (!changed) return true; // 无变化 = 选择已精确同步
+      if (!target) return true; // 全部符合期望
+      const key = (target.want ? '+' : '-') + target.text;
+      clicks[key] = (clicks[key] || 0) + 1;
+      if (clicks[key] > 3) return false; // 点了没反应，别再死循环
+      fireClick(target.it);
+      await sleep(150);
     }
     return false;
+  }
+
+  // 当前可见的下拉浮层（选项列表）
+  function findVisibleOptionHost() {
+    for (const d of document.querySelectorAll('.el-select-dropdown')) {
+      if (d.offsetParent === null) continue;
+      if (d.querySelector('.el-select-dropdown__item')) return d;
+    }
+    return null;
   }
 
   // 打开某 label 对应的下拉框、按 wantFn 同步选中项、收起（整个流程）
@@ -1100,7 +1133,7 @@
       }
       if (statusLabel) {
         ok =
-          (await syncDropdown('状态', (t) => t === statusLabel)) && ok;
+          (await syncDropdown(statusLabelName(), (t) => t === statusLabel)) && ok;
       }
       if (ok) {
         let desc = '';
@@ -1274,16 +1307,62 @@
     await sleep(400);
   }
 
-  // 只勾选「套餐 < limit」的行，返回勾选到的行数
+  // 按下标逐行勾选，并复核补勾；返回仍没勾上的下标数组
+  // 每次点击前都重新按"下标"取最新节点：勾选会触发 Vue 重渲染，缓存的 tr 会失效，
+  // 之前的实现因此只勾上了前几行（DOM 变了，后面点的是游离节点）
+  async function tickRowsByIndex(targets) {
+    const rowsNow = () => currentQueryRows();
+    const boxAt = (i) => {
+      const tr = rowsNow()[i];
+      return tr ? tr.querySelector('.el-checkbox__input') : null;
+    };
+    const isCheckedAt = (i) => {
+      const box = boxAt(i);
+      return !!(box && box.classList.contains('is-checked'));
+    };
+    const clickAt = async (i, useLabel) => {
+      if (isCheckedAt(i)) return;
+      const tr = rowsNow()[i]; // 关键：每次取最新节点
+      if (!tr) return;
+      const box = tr.querySelector('.el-checkbox__input');
+      if (!box) return;
+      const el = useLabel
+        ? tr.querySelector('.el-checkbox') || box
+        : box.querySelector('input') || box;
+      fireClick(el);
+      await sleep(90);
+    };
+
+    for (const i of targets) {
+      if (!isCheckedAt(i)) await clickAt(i);
+    }
+    // 复核 + 补勾（最多 3 轮；补勾时改点 label，兼容只监听 label 的场景）
+    let missing = [];
+    for (let pass = 0; pass < 3; pass++) {
+      missing = targets.filter((i) => !isCheckedAt(i));
+      if (!missing.length) break;
+      log('ℹ️ 第 ' + (pass + 1) + ' 轮补勾：还有 ' + missing.length + ' 行未勾上');
+      for (const i of missing) await clickAt(i, true);
+    }
+    return targets.filter((i) => !isCheckedAt(i));
+  }
+
+  // 只勾选「套餐 < limit」的行，返回"符合条件的行里真正被勾上的数量"
   // statusMust：可选，要求行的「状态」列文本包含该值（双保险：万一下拉筛选没生效也不会勾错）
+  //
+  // 关键修复：不能缓存 tr 节点。勾选会触发 Vue 重渲染，之前拿到的 tr 会变成游离节点，
+  // 后续点击无效 → 表现为"只勾上了前几行"。这里改成：
+  //   1) 先用一次快照算出应该勾的行下标（行序不会因勾选改变）
+  //   2) 每次点击前都按下标重新取最新节点，点完复核是否真的勾上
+  //   3) 最后多轮复核补勾，勾不上的明确告警（不再默默漏掉）
   async function selectRowsByPkg(limit, statusMust) {
-    const rows = currentQueryRows();
-    if (!rows.length) { log('查询结果为空'); return 0; }
+    const rowsNow = () => currentQueryRows();
+    if (!rowsNow().length) { log('查询结果为空'); return 0; }
 
     const idx = findPkgColumnIndex();
     if (idx < 0) {
       log('⚠️ 未找到「套餐」列，退化为全选查询结果');
-      return (await selectAllQueryRows()) ? currentQueryRows().length : 0;
+      return (await selectAllQueryRows()) ? rowsNow().length : 0;
     }
 
     // 状态列：仅在需要二次校验时找（列没显示时跳过校验，不阻断流程）
@@ -1296,18 +1375,20 @@
     const totalTxt = (document.querySelector('.el-pagination__total')?.innerText || '')
       .replace(/[^\d]/g, '');
     const totalNum = totalTxt ? Number(totalTxt) : 0;
-    if (totalNum && totalNum > rows.length) {
-      log('⚠️ 当前页仅 ' + rows.length + ' 行（共 ' + totalNum + ' 条），超出部分未参与勾选');
+    if (totalNum && totalNum > rowsNow().length) {
+      log('⚠️ 当前页仅 ' + rowsNow().length + ' 行（共 ' + totalNum + ' 条），超出部分未参与勾选');
     }
 
     await clearRowSelection();
-    let picked = 0;
+
+    // 1) 快照算出目标行下标
+    const base = rowsNow();
+    const targets = [];
     let skippedByStatus = 0;
-    for (const tr of rows) {
-      const cells = tr.querySelectorAll('td');
-      // 状态必须符合（如「套餐用尽」），否则跳过
+    for (let i = 0; i < base.length; i++) {
+      const cells = base[i].querySelectorAll('td');
       if (statusMust && idxStatus >= 0) {
-        const st = (cells[idxStatus]?.innerText || '').trim();
+        const st = (cells[idxStatus] ? cells[idxStatus].innerText : '').trim();
         if (!st.includes(statusMust)) { skippedByStatus++; continue; }
       }
       const cell = cells[idx];
@@ -1315,22 +1396,26 @@
       // 单元格可能带千分位/单位，取数字比较
       const txt = (cell.innerText || '').replace(/[^\d.\-]/g, '');
       const v = txt === '' ? NaN : Number(txt);
-      if (!(Number.isFinite(v) && v < limit)) continue;
-      const cbInput = tr.querySelector('.el-checkbox__input');
-      if (!cbInput || cbInput.classList.contains('is-checked')) continue;
-      const cb = tr.querySelector('.el-checkbox') || cbInput;
-      fireClick(cb.querySelector('input') || cb);
-      picked++;
-      await sleep(90); // 逐行勾选，给框架响应时间
+      if (Number.isFinite(v) && v < limit) targets.push(i);
     }
+
+    // 2) 逐个勾选 + 复核补勾
+    const missing = await tickRowsByIndex(targets);
+
     const checked = document.querySelectorAll(
       '.el-table__body-wrapper .el-checkbox__input.is-checked'
     ).length;
     log('按「套餐<' + limit + '」' + (statusMust ? ' + 状态含「' + statusMust + '」' : '') +
       '勾选（套餐列#' + idx + (idxStatus >= 0 && statusMust ? '，状态列#' + idxStatus : '') +
-      '）：命中 ' + picked + ' 行，当前已选 ' + checked + ' 行' +
-      (skippedByStatus ? '（' + skippedByStatus + ' 行状态不符已跳过）' : ''));
-    return checked;
+      '）：符合条件 ' + targets.length + ' 行，勾上 ' + (targets.length - missing.length) +
+      ' 行（表格已选 ' + checked + ' 行）' +
+      (skippedByStatus ? '，' + skippedByStatus + ' 行状态不符已跳过' : ''));
+    if (missing.length) {
+      log('⚠️ 仍有 ' + missing.length + ' 行符合条件没勾上（表格第 ' +
+        missing.slice(0, 10).map((i) => i + 1).join('、') +
+        (missing.length > 10 ? '…' : '') + ' 行），请手动补勾后再点推送');
+    }
+    return targets.length - missing.length;
   }
 
   // ===== 「发不出去筛选」：状态=封卡类 → 查询 → 勾选满足发不出去规则的行 =====
@@ -1366,10 +1451,11 @@
       const txt = (td?.innerText || '').replace(/[^\d.\-]/g, '');
       return txt === '' ? NaN : Number(txt);
     };
-    let picked = 0;
+    // 先按快照算出命中的行下标（后续按下标重新取节点，避免勾选后节点失效漏勾）
+    const targets = [];
     let skippedByData = 0;
-    for (const tr of rows) {
-      const tds = tr.querySelectorAll('td');
+    for (let i = 0; i < rows.length; i++) {
+      const tds = rows[i].querySelectorAll('td');
       const totalSend = numOf(tds[iTotal]);
       const topup = numOf(tds[iTopup]);
       const fail = numOf(tds[iFail]);
@@ -1378,20 +1464,22 @@
         skippedByData++;
         continue;
       }
-      if (!cantSendHit(totalSend, topup, fail, statusText)) continue;
-      const cbInput = tr.querySelector('.el-checkbox__input');
-      if (!cbInput || cbInput.classList.contains('is-checked')) continue;
-      const cb = tr.querySelector('.el-checkbox') || cbInput;
-      fireClick(cb.querySelector('input') || cb);
-      picked++;
-      await sleep(90); // 逐行勾选，给框架响应时间
+      if (cantSendHit(totalSend, topup, fail, statusText)) targets.push(i);
     }
+
+    const missing = await tickRowsByIndex(targets);
     const checked = document.querySelectorAll(
       '.el-table__body-wrapper .el-checkbox__input.is-checked'
     ).length;
-    log('「发不出去」勾选：命中 ' + picked + ' 行，当前已选 ' + checked + ' 行' +
-      (skippedByData ? '（' + skippedByData + ' 行数值无法解析已跳过）' : ''));
-    return checked;
+    log('「发不出去」勾选：符合规则 ' + targets.length + ' 行，勾上 ' +
+      (targets.length - missing.length) + ' 行（表格已选 ' + checked + ' 行）' +
+      (skippedByData ? '，' + skippedByData + ' 行数值无法解析已跳过' : ''));
+    if (missing.length) {
+      log('⚠️ 仍有 ' + missing.length + ' 行符合规则没勾上（表格第 ' +
+        missing.slice(0, 10).map((i) => i + 1).join('、') +
+        (missing.length > 10 ? '…' : '') + ' 行），请手动补勾');
+    }
+    return targets.length - missing.length;
   }
 
   // 一键：设备（可选限定某组）→ 状态=封卡类 → 查询 → 勾选满足发不出去规则的行
@@ -1436,7 +1524,7 @@
 
       // 2) 状态 = 疑似封卡（找不到完全同名时退化为包含「封卡」的选项）
       const okStatus = await syncDropdown(
-        '状态',
+        statusLabelName(),
         (t) => t === SEALED_STATUS_LABEL || t.includes('封卡')
       );
       if (!okStatus) {
@@ -1595,17 +1683,35 @@
         const okDev = await syncDropdown('设备', (t) => t === dev);
         if (!okDev) { log('⚠️ 设备 ' + dev + ' 筛选设置失败，跳过'); continue; }
 
+        // 1.1) 核对设备筛选有没有清干净：多选残留会被折叠成 "D11 ×+2" 这种样子
+        let devTxt = readSelectValueText('设备');
+        if (hasCollapsedOverflow(devTxt)) {
+          log('⚠️ 设备筛选残留多项（' + devTxt + '），再重置一次并重选 ' + dev);
+          await clickResetButton();
+          await syncDropdown('设备', (t) => t === dev);
+          devTxt = readSelectValueText('设备');
+          if (hasCollapsedOverflow(devTxt)) {
+            log('⚠️ 设备 ' + dev + ': 无法只保留单台设备（当前：' + devTxt +
+              '），跳过 —— 避免把端口推送到别的设备；' +
+              '可先手动把「设备」清空到只剩 ' + dev + ' 再重试');
+            continue;
+          }
+        }
+
         // 1.5) 状态筛选 = 套餐用尽（只处理已把套餐发完的端口）
         prog('📋 批量' + menuItem + '（' + groupName + '）' +
           (i + 1) + '/' + devices.length + ' — 设备 ' + dev +
           '：设状态=' + BATCH_STATUS_FILTER + '…');
-        const okStatus = await syncDropdown('状态', (t) => t === BATCH_STATUS_FILTER);
+        const okStatus = await syncDropdown(statusLabelName(), (t) => t === BATCH_STATUS_FILTER);
         if (!okStatus) {
           log('⚠️ 设备 ' + dev + ': 状态「' + BATCH_STATUS_FILTER +
             '」筛选设置失败（下拉里没有该选项？），跳过 —— 避免推送非「' +
             BATCH_STATUS_FILTER + '」的端口');
           continue;
         }
+        const stTxt = readSelectValueText(statusLabelName());
+        log('设备=' + dev + '，设备筛选=' + (devTxt || dev) +
+          '，状态筛选=' + (stTxt || BATCH_STATUS_FILTER));
 
         // 2) 清空「发送总数」条件（改用套餐阈值筛选，避免残留 >500 之类的旧条件）
         clearSendTotalCondition();
@@ -1975,5 +2081,5 @@
     start();
   }
 
-  log('v1.16.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
+  log('v1.17.0 已加载，设备分组来源：业务配置 ' + CONFIG_KEY + '（拉取失败时用内置兜底）');
 })();
