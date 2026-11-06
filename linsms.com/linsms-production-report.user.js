@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         linsms 生产报表导出
 // @namespace    gavin.sms62
-// @version      0.5.0
-// @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 业务时间/国家/企业/用户/供应商 汇总导出 XLSX（企业列与小计列按客户合并单元格），单价从 /user-products 匹配或按 费用÷成功条数 推导；企业/用户名称从列表接口与页面筛选下拉框双向兜底解析，供应商从通道列表 providerName 或通道名解析
+// @version      0.6.0
+// @description  adm.linsms.com/monitoring-reports 页面数据加载完成后，在「查询日报」前显示「生产报表」按钮；点击后按 业务时间/国家/企业/用户/供应商 汇总导出 XLSX（企业列与小计列按客户合并单元格），单价从 /user-products 匹配或按 费用÷成功条数 推导；企业/用户名称从列表接口与页面筛选下拉框双向兜底解析，供应商从通道列表 providerName 或通道名解析；每次查询自动清空上一批数据
 // @author       Gavin
 // @match        http://adm.linsms.com/*
 // @match        https://adm.linsms.com/*
@@ -86,6 +86,28 @@
   let reportRows = [];        // 监控报表页嗅探到的原始记录
   const seenSig = new Set();  // 记录去重
   let showBtn = false;        // 数据加载完成后才显示按钮
+
+  // 查询批次判定：一次「查询日报」可能并发多个 user-daily 请求（实测同 URL 会发两次），
+  // 只有筛选条件变了、或距上一次响应超过 2s，才算新一批
+  const QUERY_GAP = 2000;
+  const QUERY_PARAMS = ['countryCode', 'from', 'to', 'date', 'enterpriseId', 'enterpriseUserId', 'productId', 'channelId'];
+  let lastQueryKey = '';
+  let lastQueryAt = 0;
+
+  function isNewQuery(url) {
+    let key = '';
+    try {
+      const u = new URL(url, location.origin);
+      key = QUERY_PARAMS.map((k) => `${k}=${u.searchParams.get(k) || ''}`).join('&');
+    } catch (e) {
+      key = url;
+    }
+    const now = Date.now();
+    const fresh = key !== lastQueryKey || now - lastQueryAt > QUERY_GAP;
+    lastQueryKey = key;
+    lastQueryAt = now;
+    return fresh;
+  }
 
   // 单价映射（GM 持久化，独立于报表数据）
   let priceByKey = new Map();  // "user|country"(小写) -> price
@@ -442,6 +464,13 @@
     // 监控报表数据：仅报表页 + user-daily 接口（表格数据源）。
     // country-daily 是顶部汇总卡数据，吸收会导致重复计算，跳过
     if (isReportPage() && /user-daily/i.test(url)) {
+      // 每次「查询日报」都是新一批数据：不清空会把上一次查询（比如国家=BR）的行
+      // 一起累积进来，导出就混入不属于当前筛选的记录
+      if (isNewQuery(url)) {
+        if (reportRows.length) log(`检测到新查询，清空上一批 ${reportRows.length} 条`);
+        reportRows = [];
+        seenSig.clear();
+      }
       let hit = 0;
       walkRecords(data, (rec) => { if (absorbReportRecord(rec)) hit++; });
       // 兜底：接口返回单个聚合对象（非数组）时直接尝试吸收
@@ -865,6 +894,8 @@
         reportRows = [];
         seenSig.clear();
         showBtn = false;
+        lastQueryKey = '';
+        lastQueryAt = 0;
         const btn = document.getElementById(BTN_ID);
         if (btn) btn.remove();
         log('离开报表页，数据已重置');
@@ -898,7 +929,7 @@
   try { hookXhr(); hookFetch(); } catch (e) { console.error('[生产报表] 挂钩失败', e); }
 
   function boot() {
-    log('v0.5.0 启动', location.href);
+    log('v0.6.0 启动', location.href);
     loadPriceCache();
     try { PAGE.__linsmsReportDebug = debugDump; } catch (e) { /* ignore */ }
 
